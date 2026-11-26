@@ -3,7 +3,7 @@ FONT ?= /usr/share/grub/unicode.pf2
 CFLAGS = -Isrc/libc -Ithird_party/bearssl/inc -ffreestanding -fshort-wchar -mno-stack-arg-probe -fno-stack-protector \
          -fno-builtin -O2 -Wall -Wextra -Ibuild
 BOOT = build/esp/EFI/BOOT
-HDRS = src/os.h src/efi.h src/net.h build/font.h build/fontaa.h third_party/trust_anchors.h
+HDRS = src/os.h src/efi.h src/net.h build/font.h build/fontaa.h build/icons.h third_party/trust_anchors.h
 PYTHON ?= python3
 BIZUD = third_party/bizud
 
@@ -17,6 +17,11 @@ build/font.h: tools/mkfont.py $(FONT)
 # なめらかな文字 (BIZ UDゴシック)。Pillow と fontTools が必要
 build/fontaa.h: tools/mkfontaa.py build/font.h $(BIZUD)/BIZUDGothic-Regular.ttf $(BIZUD)/BIZUDPGothic-Bold.ttf
 	$(PYTHON) tools/mkfontaa.py build/font.h $(BIZUD)/BIZUDGothic-Regular.ttf $(BIZUD)/BIZUDPGothic-Bold.ttf $@
+
+# アプリのアイコン (Pillow が必要)
+build/icons.h: tools/mkicons.py $(BIZUD)/BIZUDPGothic-Bold.ttf
+	@mkdir -p build
+	$(PYTHON) tools/mkicons.py $(BIZUD)/BIZUDPGothic-Bold.ttf $@
 
 APP = core apps net http browser transfer solitaire virtio sound hda boot calc
 VER = 1.3

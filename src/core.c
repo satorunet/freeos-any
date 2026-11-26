@@ -3,6 +3,7 @@
 #include "net.h"
 #include "font.h"
 #include "fontaa.h"
+#include "icons.h"
 
 SystemTable *ST;
 BootServices *BS;
@@ -313,8 +314,8 @@ void fs_init(Handle image) {
 
 /* ---- ウィンドウ管理 ---- */
 #define TITLE 24
-#define DOCK 36
-typedef struct { int open, max, x, y; } Win;
+#define DOCK 48
+typedef struct { int open, max, min, x, y; } Win; /* min: 最小化 (タスクバーのアイコンだけ) */
 static Win wins[APP_COUNT];
 static int order[APP_COUNT], nwin; /* 後ろほど手前 */
 static int dirty = 1, mx, my, mdown, drag = -1, dragx, dragy, hasPointer;
@@ -323,7 +324,10 @@ static int noteTicks;
 
 void invalidate(void) { dirty = 1; }
 void notify(const c16 *msg) { scopy(note, msg, 160); noteTicks = 150; dirty = 1; }
+/* 一番手前に見えているアプリ (なければ -1) */
+static int top_app(void) { return nwin && !wins[order[nwin - 1]].min ? order[nwin - 1] : -1; }
 static void raise(int app) {
+    wins[app].min = 0;
     int i = 0;
     while (i < nwin && order[i] != app) i++;
     if (i == nwin) return;
@@ -343,15 +347,25 @@ void wm_open(int a) {
     }
     raise(a);
 }
+/* 最小化: 一番奥へ回して隠す */
+static void wm_minimize(int a) {
+    if (!wins[a].open) return;
+    int i = 0;
+    while (i < nwin && order[i] != a) i++;
+    for (; i > 0; i--) order[i] = order[i - 1];
+    order[0] = a;
+    wins[a].min = 1;
+    dirty = 1;
+}
 void wm_close(int a) {
     if (!wins[a].open) return;
     if (apps[a].flush) apps[a].flush();
     raise(a);
     nwin--;
-    wins[a].open = 0;
+    wins[a].open = wins[a].min = 0;
     dirty = 1;
 }
-int wm_active(int a) { return nwin && order[nwin - 1] == a; }
+int wm_active(int a) { return top_app() == a; }
 void power(int reboot) {
     for (int a = 0; a < APP_COUNT; a++) if (wins[a].open && apps[a].flush) apps[a].flush();
     ST->rt->ResetSystem(reboot ? 0 : 2, 0, 0, 0);
@@ -362,11 +376,36 @@ static void geometry(int a, int *x, int *y, int *w, int *h) {
     *w = apps[a].w > SW ? SW : apps[a].w;
     *h = apps[a].h > SH - DOCK ? SH - DOCK : apps[a].h;
 }
+/* アイコン (ARGB) を描く。size は 32 / 20 / 16 */
+#define ICON_LOGO (ICON_N - 1)
+static void icon_draw(int id, int size, int x0, int y0) {
+    const u32 *px = size == 32 ? icon32[id] : size == 20 ? icon20[id] : icon16[id];
+    for (int y = 0; y < size; y++) for (int x = 0; x < size; x++) {
+        u32 c = px[y * size + x], a = c >> 24;
+        int X = x0 + x, Y = y0 + y;
+        if (!a || X < cx0 || X >= cx1 || Y < cy0 || Y >= cy1) continue;
+        u32 *p = &back[Y * SW + X], d = *p;
+        if (a == 255) { *p = c & 0xFFFFFF; continue; }
+        u32 r = (((c >> 16) & 255) * a + ((d >> 16) & 255) * (255 - a)) / 255;
+        u32 g = (((c >> 8) & 255) * a + ((d >> 8) & 255) * (255 - a)) / 255;
+        u32 b = ((c & 255) * a + (d & 255) * (255 - a)) / 255;
+        *p = r << 16 | g << 8 | b;
+    }
+}
+/* 角を丸めた四角 (半径 r) */
+static void fill_round(int x, int y, int w, int h, int r, u32 color) {
+    for (int j = 0; j < h; j++) {
+        int inset = 0, dy = j < r ? r - j : j >= h - r ? j - (h - r - 1) : 0;
+        if (dy) { while (inset < r && (r - inset) * (r - inset) + dy * dy > r * r + r) inset++; }
+        fill(x + inset, y + j, w - inset * 2, 1, color);
+    }
+}
+
 /* ---- スタートメニュー ---- */
 #define MENU_N (APP_COUNT + 2)
 #define MENU_W 230
-#define MENU_ROW 26
-#define START_W 92
+#define MENU_ROW 30
+#define START_W 112
 static int menu, msel;
 static const c16 *menuKey[APP_COUNT] = {u"F5", u"F6", u"F7", u"F8", u"F9"};
 static int menu_y(void) { return SH - DOCK - MENU_N * MENU_ROW - 10; }
@@ -383,14 +422,25 @@ static void menu_draw(void) {
         int py = y + 4 + i * MENU_ROW;
         if (i == msel) fill(7, py, MENU_W - 6, MENU_ROW, 0x6D5DFC);
         if (i == APP_COUNT) fill(12, py, MENU_W - 16, 1, 0x55556A);
-        text(20, py + 5, i < APP_COUNT ? apps[i].title : i == APP_COUNT ? u"再起動" : u"シャットダウン", 0xFFFFFF);
-        if (i < APP_COUNT && menuKey[i]) text(MENU_W - 28, py + 5, menuKey[i], 0xB0B0D0);
+        if (i < APP_COUNT) icon_draw(i, 20, 14, py + 5);
+        text(i < APP_COUNT ? 44 : 20, py + 7, i < APP_COUNT ? apps[i].title : i == APP_COUNT ? u"再起動" : u"シャットダウン", 0xFFFFFF);
+        if (i < APP_COUNT && menuKey[i]) text(MENU_W - 28, py + 7, menuKey[i], 0xB0B0D0);
     }
 }
-/* タスクバー上の i 番目の位置 (開いているウィンドウをアプリ順に並べる) */
-static int task_width(void) {
-    int n = nwin ? nwin : 1, w = (SW - START_W - 130) / n;
-    return w > 130 ? 130 : w;
+/* タスクバー: すべてのアプリのアイコンを並べる */
+#define SLOT 48
+static int slot_x(int a) { return START_W + 8 + a * SLOT; }
+static int slot_at(int x, int y) {
+    if (y < SH - DOCK) return -1;
+    for (int a = 0; a < APP_COUNT; a++) if (x >= slot_x(a) && x < slot_x(a) + SLOT) return a;
+    return -1;
+}
+/* アイコンを押したとき: 起動していなければ起動、裏なら手前へ、手前なら最小化 */
+static void dock_press(int a) {
+    if (!wins[a].open) wm_open(a);
+    else if (top_app() == a) wm_minimize(a);
+    else raise(a);
+    dirty = 1;
 }
 
 /* マウスカーソル: 白地に黒い縁の矢印と、うすい影 */
@@ -427,36 +477,49 @@ static void compose(void) {
     text(SW - 120, 16, u"FreeOS Any 1.3", 0xB8B8E0);
     if (!nwin) text(24, 24, u"Esc かスタートボタンでメニューを開きます", 0xFFFFFF);
     for (int i = 0; i < nwin; i++) {
-        int a = order[i], x, y, w, h, top = i == nwin - 1;
+        int a = order[i], x, y, w, h, top = a == top_app();
+        if (wins[a].min) continue;
         geometry(a, &x, &y, &w, &h);
         noclip();
         fill(x + 5, y + 5, w, h, 0x15152A);
         fill(x, y, w, h, top ? 0x7C6CFF : 0x55556A);
         fill(x + 1, y + TITLE, w - 2, h - TITLE - 1, 0xF4F4FA);
-        text(x + 8, y + 4, apps[a].title, 0xFFFFFF);
+        icon_draw(a, 16, x + 6, y + 4);
+        text(x + 28, y + 4, apps[a].title, 0xFFFFFF);
         text(x + w - 18, y + 4, u"×", 0xFFFFFF);
+        fill(x + w - 45, y + 12, 10, 2, 0xFFFFFF); /* 最小化 */
         clip(x + 1, y + TITLE, w - 2, h - TITLE - 1);
         apps[a].draw(x + 1, y + TITLE, w - 2, h - TITLE - 1);
     }
     noclip();
     fill(0, SH - DOCK, SW, DOCK, 0x16161F);
-    fill(6, SH - DOCK + 5, START_W - 10, 26, menu ? 0x9585FF : 0x6D5DFC);
-    text(18, SH - DOCK + 10, u"スタート", 0xFFFFFF);
-    int x = START_W, tw = task_width();
+    fill(0, SH - DOCK, SW, 1, 0x2A2A3A);
+    fill_round(6, SH - DOCK + 7, START_W - 12, DOCK - 14, 8, menu ? 0x9585FF : 0x6D5DFC);
+    icon_draw(ICON_LOGO, 20, 14, SH - DOCK + 14);
+    text(40, SH - DOCK + 16, u"スタート", 0xFFFFFF);
+    int hover = hasPointer && !menu ? slot_at(mx, my) : -1;
     for (int a = 0; a < APP_COUNT; a++) {
-        if (!wins[a].open) continue;
-        fill(x, SH - DOCK + 5, tw - 6, 26, nwin && order[nwin - 1] == a ? 0x6D5DFC : 0x3A3A52);
-        clip(x, SH - DOCK, tw - 8, DOCK);
-        text(x + 8, SH - DOCK + 10, apps[a].title, 0xFFFFFF);
-        noclip();
-        x += tw;
+        int x = slot_x(a), y = SH - DOCK;
+        if (a == top_app()) fill_round(x + 3, y + 3, SLOT - 6, DOCK - 6, 8, 0x3A3270);
+        else if (a == hover) fill_round(x + 3, y + 3, SLOT - 6, DOCK - 6, 8, 0x2A2A3C);
+        icon_draw(a, 32, x + (SLOT - 32) / 2, y + 6);
+        if (wins[a].open) { /* 起動中の印 */
+            int w = a == top_app() ? 16 : 6;
+            fill_round(x + (SLOT - w) / 2, y + DOCK - 5, w, 3, 1, a == top_app() ? 0xFFFFFF : 0x9C9CC0);
+        }
+    }
+    if (hover >= 0) { /* アプリ名の札 */
+        int tw = 0; for (const c16 *p = apps[hover].title; *p; p++) tw += charw(*p);
+        int bx = slot_x(hover) + SLOT / 2 - tw / 2 - 10; if (bx < 4) bx = 4;
+        fill_round(bx, SH - DOCK - 34, tw + 20, 28, 6, 0x0E0E16);
+        text(bx + 10, SH - DOCK - 28, apps[hover].title, 0xFFFFFF);
     }
     Time t;
     if (!ST->rt->GetTime(&t, 0)) {
         c16 s[24] = u"";
         snum(s, t.month, 0, 24); scat(s, u"/", 24); snum(s, t.day, 0, 24); scat(s, u" ", 24);
         snum(s, t.hour, 2, 24); scat(s, u":", 24); snum(s, t.minute, 2, 24);
-        text(SW - 100, SH - DOCK + 10, s, 0xFFFFFF);
+        text(SW - 100, SH - DOCK + 16, s, 0xFFFFFF);
     }
     if (noteTicks) {
         int w = 24; for (int i = 0; note[i]; i++) w += charw(note[i]);
@@ -477,17 +540,19 @@ static void press(void) {
     }
     if (my >= SH - DOCK) {
         if (mx < START_W) { menu = 1; msel = 0; return; }
-        int x = START_W, tw = task_width();
-        for (int a = 0; a < APP_COUNT; a++) { if (!wins[a].open) continue; if (mx >= x && mx < x + tw) { raise(a); return; } x += tw; }
+        int a = slot_at(mx, my);
+        if (a >= 0) dock_press(a);
         return;
     }
     for (int i = nwin - 1; i >= 0; i--) {
         int a = order[i], x, y, w, h;
+        if (wins[a].min) continue;
         geometry(a, &x, &y, &w, &h);
         if (mx < x || my < y || mx >= x + w || my >= y + h) continue;
         raise(a);
         if (my < y + TITLE) {
             if (mx >= x + w - 26) wm_close(a);
+            else if (mx >= x + w - 52) wm_minimize(a);
             else if (!wins[a].max) { drag = a; dragx = mx - x; dragy = my - y; }
         } else if (apps[a].click) apps[a].click(mx - x - 1, my - y - TITLE);
         return;
@@ -549,7 +614,7 @@ static void pointer_poll(void) {
 }
 
 static void key(Key k) {
-    int top = nwin ? order[nwin - 1] : -1;
+    int top = top_app();
     dirty = 1;
     if (k.scan == 0x17) { menu ^= 1; msel = 0; return; }                 /* Esc */
     if (menu) {
