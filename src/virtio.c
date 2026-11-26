@@ -148,6 +148,7 @@ void tablet_poll(void) {
         if (e.type == 3 && e.code == 0) t.x = e.value;
         else if (e.type == 3 && e.code == 1) t.y = e.value;
         else if (e.type == 1 && (e.code == 0x110 || e.code == 0x14A)) t.down = e.value != 0;
+        else if (e.type == 2 && e.code == 8) pointer_wheel(-(int)e.value); /* ホイール (上が +) */
         else if (e.type == 0) pointer_abs(t.x, t.y, t.down); /* 1回分の入力がそろった */
         t.avail->ring[t.avail->idx % t.size] = id; /* 同じ場所を装置に返す */
         __atomic_thread_fence(__ATOMIC_SEQ_CST);

@@ -59,12 +59,13 @@ typedef struct {
     void (*click)(int x, int y); /* ウィンドウ内の座標 */
     void (*tick)(void);          /* 約20msごと */
     void (*flush)(void);         /* 閉じる前・電源を切る前の保存 */
+    void (*wheel)(int dy);       /* ホイール (下へ +)。なければ矢印キーとして送る */
 } App;
 extern App apps[APP_COUNT];
 void edit_open(const c16 *path);
 
 /* ---- 起動アニメーションと起動音 ---- */
-#define FREEOS_VER u"1.9"
+#define FREEOS_VER u"2.0"
 u32 *screen(void);                     /* 描画先 (SW x SH) */
 void screen_show(void);                /* 描画先を画面に出す */
 void desktop_compose(void);            /* デスクトップを描画先に描く (画面には出さない) */
@@ -79,10 +80,11 @@ void sound_poll(void);
 void tablet_init(void);
 void tablet_poll(void);
 void pointer_abs(int x, int y, int down); /* 座標は 0〜32767 */
+void pointer_wheel(int dy);               /* 下へ + */
 
 /* 別ファイルのアプリ */
 void browser_open(void); void browser_draw(int x, int y, int w, int h); void browser_key(Key k); void browser_click(int x, int y);
-void browser_go(const char *url);
+void browser_go(const char *url); void browser_tick(void); void browser_wheel(int dy); void browser_open_file(const c16 *path);
 int download(const char *url, c16 *path);
 void transfer_draw(int x, int y, int w, int h); void transfer_key(Key k); void transfer_click(int x, int y); void transfer_tick(void); void transfer_stop(void);
 void calc_open(void); void calc_draw(int x, int y, int w, int h); void calc_key(Key k); void calc_click(int x, int y); void calc_tick(void);

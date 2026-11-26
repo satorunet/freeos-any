@@ -470,21 +470,59 @@ static void cursor_draw(int x0, int y0) {
 }
 
 static int edge_at(int px, int py, int *app);
-/* サイズ変更のカーソル: 両矢印 (横 / 縦 / 斜め) */
+/* サイズ変更のカーソル: 白地に黒い縁の両矢印 (なめらかな縁と影)。向きは (ux, uy) */
+static float csqrt(float x) {
+    if (x <= 0) return 0;
+#if defined(__aarch64__)
+    float r; __asm__("fsqrt %s0, %s1" : "=w"(r) : "w"(x)); return r;
+#else
+    float r; __asm__("sqrtss %1, %0" : "=x"(r) : "x"(x)); return r;
+#endif
+}
+static float tri_d(float px, float py, const float *t) { /* 三角形までの距離 (内側は負、おおよそ) */
+    float d = -1e9f;
+    for (int i = 0; i < 3; i++) {
+        float ax = t[i * 2], ay = t[i * 2 + 1], bx = t[(i + 1) % 3 * 2], by = t[(i + 1) % 3 * 2 + 1];
+        float ex = bx - ax, ey = by - ay, l = csqrt(ex * ex + ey * ey);
+        float s = -((px - ax) * ey - (py - ay) * ex) / l; /* 左側が外 */
+        if (s > d) d = s;
+    }
+    return d;
+}
+static float arrow_d(float u, float v) {
+    const float L = 10, H = 7, W = 6.5f;
+    float au = u < 0 ? -u : u, av = v < 0 ? -v : v;
+    float box = au - (L - H) > av - 2.6f ? au - (L - H) : av - 2.6f;
+    float t[6] = {L, 0, L - H, -W, L - H, W};
+    float tri = tri_d(au, v, t);
+    return box < tri ? box : tri;
+}
+static void cblend(int x, int y, u32 c, float a) {
+    if (a <= 0 || x < 0 || y < 0 || x >= SW || y >= SH) return;
+    if (a > 1) a = 1;
+    u32 *p = &back[y * SW + x], d = *p;
+    u32 r = (u32)(((c >> 16) & 255) * a + ((d >> 16) & 255) * (1 - a));
+    u32 g = (u32)(((c >> 8) & 255) * a + ((d >> 8) & 255) * (1 - a));
+    u32 b = (u32)((c & 255) * a + (d & 255) * (1 - a));
+    *p = r << 16 | g << 8 | b;
+}
 static void resize_cursor_draw(int cx, int cy, int e) {
-    int dx = (e & 3) ? 1 : 0, dy = (e & 4) ? 1 : 0;
-    if (dx && dy && (e & 1)) dx = -1; /* 左下の角は / の向き */
-    for (int pass = 0; pass < 2; pass++) {
-        u32 col = pass ? 0xFFFFFF : 0x000000; int t = pass ? 0 : 1;
-        for (int i = -8; i <= 8; i++) fill(cx + i * dx - t, cy + i * dy - t, 1 + 2 * t, 1 + 2 * t, col); /* 軸 */
-        for (int sgn = -1; sgn <= 1; sgn += 2) for (int k = 0; k < 5; k++) { /* 両端の矢じり */
-            int ex = cx + sgn * 8 * dx, ey = cy + sgn * 8 * dy;
-            int bx = -sgn * dx * k, by = -sgn * dy * k;
-            int px1 = ex + bx + (dy ? k : 0) * (dx ? 0 : 1), py1 = ey + by + (dx ? k : 0) * (dy ? 0 : 1);
-            int px2 = ex + bx - (dy ? k : 0) * (dx ? 0 : 1), py2 = ey + by - (dx ? k : 0) * (dy ? 0 : 1);
-            if (dx && dy) { px1 = ex + bx; py1 = ey; px2 = ex; py2 = ey + by; }
-            fill(px1 - t, py1 - t, 1 + 2 * t, 1 + 2 * t, col); fill(px2 - t, py2 - t, 1 + 2 * t, 1 + 2 * t, col);
-        }
+    float ux = 1, uy = 0;
+    if ((e & 3) && (e & 4)) { ux = 0.7071f; uy = e & 2 ? 0.7071f : -0.7071f; }
+    else if (e & 4) { ux = 0; uy = 1; }
+    for (int y = -13; y <= 13; y++) for (int x = -13; x <= 13; x++) {
+        float px = x + 0.5f, py = y + 0.5f;
+        float sx = px - 1, sy = py - 1.5f; /* 影 */
+        float ds = arrow_d(sx * ux + sy * uy, -sx * uy + sy * ux);
+        float sh = 1.6f - ds; sh = sh < 0 ? 0 : sh > 1.6f ? 1.6f : sh;
+        cblend(cx + x, cy + y, 0x000000, sh * 0.18f);
+    }
+    for (int y = -13; y <= 13; y++) for (int x = -13; x <= 13; x++) {
+        float px = x + 0.5f, py = y + 0.5f;
+        float d = arrow_d(px * ux + py * uy, -px * uy + py * ux);
+        float outer = 0.5f - d, inner = 0.5f - (d + 1.3f);
+        cblend(cx + x, cy + y, 0x000000, outer);
+        cblend(cx + x, cy + y, 0xFFFFFF, inner);
     }
 }
 
@@ -648,6 +686,20 @@ static void pointer_update(int x, int y, int down) {
     }
     mdown = down;
 }
+/* ホイール: マウスの下の窓へ */
+void pointer_wheel(int dy) {
+    if (!dy) return;
+    for (int i = nwin - 1; i >= 0; i--) {
+        int a = order[i], x, y, w, h;
+        if (wins[a].min) continue;
+        geometry(a, &x, &y, &w, &h);
+        if (mx < x || my < y || mx >= x + w || my >= y + h) continue;
+        if (apps[a].wheel) apps[a].wheel(dy);
+        else if (apps[a].key) for (int k = 0; k < 3 * (dy < 0 ? -dy : dy); k++) { Key kk = {(u16)(dy < 0 ? 1 : 2), 0}; apps[a].key(kk); }
+        dirty = 1;
+        return;
+    }
+}
 void pointer_abs(int x, int y, int down) {
     hasPointer = 1;
     pointer_update((int)((i64)x * SW / 32768), (int)((i64)y * SH / 32768), down);
@@ -678,6 +730,7 @@ static void pointer_poll(void) {
         if (!dx && s.x) dx = s.x > 0 ? 1 : -1;
         if (!dy && s.y) dy = s.y > 0 ? 1 : -1;
         hasPointer = 1;
+        if (s.z) pointer_wheel(s.z > 0 ? -1 : 1);
         pointer_update(mx + dx, my + dy, s.left);
     }
     for (int i = 0; i < nabs; i++) {

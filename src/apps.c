@@ -228,7 +228,10 @@ static int in_trash(void) { const c16 *t = u"\\TRASH"; int i = 0; while (t[i] &&
 static void files_enter(void) {
     c16 path[PATHLEN];
     if (!selected(path)) return;
-    if (flist[fsel].dir) { scopy(fdir, path, PATHLEN); fsel = ftop = 0; files_load(); }
+    if (flist[fsel].dir) { scopy(fdir, path, PATHLEN); fsel = ftop = 0; files_load(); return; }
+    int n = slen(path); /* .html / .htm はブラウザで開く */
+    if ((n > 5 && (path[n - 5] | 32) == '.' && (path[n - 4] | 32) == 'h' && (path[n - 3] | 32) == 't' && (path[n - 2] | 32) == 'm' && (path[n - 1] | 32) == 'l') ||
+        (n > 4 && (path[n - 4] | 32) == '.' && (path[n - 3] | 32) == 'h' && (path[n - 2] | 32) == 't' && (path[n - 1] | 32) == 'm')) browser_open_file(path);
     else edit_open(path);
 }
 static void files_key(Key k) {
@@ -475,12 +478,12 @@ static void about_draw(int x, int y, int w, int h) {
 }
 
 App apps[APP_COUNT] = {
-    [APP_TERM]  = {u"ターミナル", 600, 380, term_open, term_draw, term_key, 0, 0, 0},
-    [APP_FILES] = {u"ファイル", 420, 360, files_load, files_draw, files_key, files_click, files_tick, 0},
-    [APP_EDIT]  = {u"エディター", 580, 400, edit_start, edit_draw, edit_key, 0, edit_tick, edit_flush},
-    [APP_BROWSER]   = {u"ブラウザ", 720, 520, browser_open, browser_draw, browser_key, browser_click, 0, 0},
-    [APP_TRANSFER]  = {u"ファイル転送", 440, 250, 0, transfer_draw, transfer_key, transfer_click, transfer_tick, transfer_stop},
-    [APP_SOLITAIRE] = {u"ソリティア", 394, 480, solitaire_open, solitaire_draw, solitaire_key, solitaire_click, 0, 0},
-    [APP_CALC]  = {u"電卓", 340, 420, calc_open, calc_draw, calc_key, calc_click, calc_tick, 0},
-    [APP_ABOUT] = {u"情報", 440, 220, about_open, about_draw, 0, 0, 0, 0},
+    [APP_TERM]  = {u"ターミナル", 600, 380, term_open, term_draw, term_key, 0, 0, 0, 0},
+    [APP_FILES] = {u"ファイル", 420, 360, files_load, files_draw, files_key, files_click, files_tick, 0, 0},
+    [APP_EDIT]  = {u"エディター", 580, 400, edit_start, edit_draw, edit_key, 0, edit_tick, edit_flush, 0},
+    [APP_BROWSER]   = {u"ブラウザ", 760, 560, browser_open, browser_draw, browser_key, browser_click, browser_tick, 0, browser_wheel},
+    [APP_TRANSFER]  = {u"ファイル転送", 440, 250, 0, transfer_draw, transfer_key, transfer_click, transfer_tick, transfer_stop, 0},
+    [APP_SOLITAIRE] = {u"ソリティア", 394, 480, solitaire_open, solitaire_draw, solitaire_key, solitaire_click, 0, 0, 0},
+    [APP_CALC]  = {u"電卓", 340, 420, calc_open, calc_draw, calc_key, calc_click, calc_tick, 0, 0},
+    [APP_ABOUT] = {u"情報", 440, 220, about_open, about_draw, 0, 0, 0, 0, 0},
 };

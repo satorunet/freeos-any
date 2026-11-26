@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>やることリスト</title></head>
+<body>
+<h1>やることリスト</h1>
+<p>保存した HTML ファイルを開いて、JavaScript で動かす見本です。</p>
+<p><input id="t" placeholder="やること" size="30"> <button id="add">追加</button></p>
+<ul id="list"></ul>
+<p id="count" style="color: teal"></p>
+<script>
+const items = ["牛乳を買う", "FreeOS Any を試す"];
+function draw() {
+  const ul = document.getElementById("list");
+  ul.innerHTML = items.map((x, i) => `<li>${x}</li>`).join("");
+  document.getElementById("count").textContent = `全部で ${items.length} 件`;
+}
+document.getElementById("add").addEventListener("click", () => {
+  const v = document.getElementById("t").value.trim();
+  if (v) { items.push(v); document.getElementById("t").value = ""; draw(); }
+});
+draw();
+</script>
+</body></html>

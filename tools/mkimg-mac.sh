@@ -10,6 +10,8 @@ newfs_msdos -F 32 -v FREEOSANY "$DEV" >/dev/null
 MNT=$(mktemp -d)
 mount -t msdos "$DEV" "$MNT"
 cp -R build/esp/EFI "$MNT/"
+# 見本の HTML (ファイルアプリからブラウザで開ける)
+if [ -d samples ]; then mkdir -p "$MNT/HOME"; cp samples/* "$MNT/HOME/"; fi
 dot_clean -m "$MNT" 2>/dev/null || true
 find "$MNT" -name '._*' -delete
 umount "$MNT"; rmdir "$MNT"

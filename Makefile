@@ -23,8 +23,8 @@ build/icons.h: tools/mkicons.py tools/logo.py $(BIZUD)/BIZUDPGothic-Bold.ttf
 	@mkdir -p build
 	$(PYTHON) tools/mkicons.py $(BIZUD)/BIZUDPGothic-Bold.ttf $@
 
-APP = core apps net http browser transfer solitaire virtio sound hda boot calc
-VER = 1.9
+APP = core apps net http js browser transfer solitaire virtio sound hda boot calc
+VER = 2.0
 # BearSSL はOS標準の機能(乱数・時計・SIMD)に頼らない設定でビルドする
 TLSFLAGS = -ffreestanding -mno-stack-arg-probe -fno-stack-protector -fno-builtin -O2 -w \
   -Isrc/libc -Ithird_party/bearssl/inc -Ithird_party/bearssl/src \
@@ -60,6 +60,7 @@ image: all
 	truncate -s 64M build/freeos-any.img
 	mkfs.fat -F 32 -n FREEOSANY build/freeos-any.img >/dev/null
 	mcopy -s -i build/freeos-any.img build/esp/EFI ::/
+	mmd -i build/freeos-any.img ::/HOME && mcopy -i build/freeos-any.img samples/* ::/HOME/
 
 # macOS で作る場合 (hdiutil と newfs_msdos を使う)
 image-mac: all
