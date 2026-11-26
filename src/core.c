@@ -2,6 +2,7 @@
 #include "os.h"
 #include "net.h"
 #include "font.h"
+#include "fontaa.h"
 
 SystemTable *ST;
 BootServices *BS;
@@ -65,13 +66,41 @@ int glyph_bits(c16 ch, const u16 **bits) {
     return font_width[g];
 }
 int charw(c16 ch) { int g = find_glyph(ch); return g < 0 ? 8 : font_width[g]; }
+/* 濃さ a (0〜15) で色を混ぜる */
+static void shade(int x, int y, u32 c, u32 a) {
+    if (x < cx0 || x >= cx1 || y < cy0 || y >= cy1) return;
+    u32 *p = &back[y * SW + x], d = *p;
+    if (a >= 15) { *p = c; return; }
+    u32 r = (((c >> 16) & 255) * a + ((d >> 16) & 255) * (15 - a)) / 15;
+    u32 g = (((c >> 8) & 255) * a + ((d >> 8) & 255) * (15 - a)) / 15;
+    u32 b = ((c & 255) * a + (d & 255) * (15 - a)) / 15;
+    *p = r << 16 | g << 8 | b;
+}
 int glyph(int x, int y, c16 ch, u32 color) {
     int g = find_glyph(ch);
     if (g < 0) g = find_glyph(u'?');
-    for (int row = 0; row < 16; row++)
-        for (int col = 0; col < font_width[g]; col++)
+    int w = font_width[g];
+    u32 off = fontaa_off[g];
+    if (off != 0xFFFFFFFF) { /* BIZ UDゴシック (なめらか) */
+        const u8 *d = fontaa_data + off;
+        for (int i = 0; i < 16 * w; i++) {
+            u32 a = i & 1 ? d[i >> 1] & 15 : d[i >> 1] >> 4;
+            if (a) shade(x + i % w, y + i / w, color, a);
+        }
+        return w;
+    }
+    for (int row = 0; row < 16; row++) /* Unifont */
+        for (int col = 0; col < w; col++)
             if (font_bits[g][row] & (0x8000 >> col)) fill(x + col, y + row, 1, 1, color);
-    return font_width[g];
+    return w;
+}
+/* 起動画面の名前用の大きな文字 (濃さ 0〜255、高さ TITLE_H) */
+const u8 *title_bitmap(c16 ch, int *w, int *adv, int *h) {
+    *h = TITLE_H;
+    for (int i = 0; i < TITLE_N; i++)
+        if (title_glyph[i].code == ch) { *w = title_glyph[i].w; *adv = title_glyph[i].adv; return title_data + title_glyph[i].off; }
+    *w = *adv = 0;
+    return 0;
 }
 int text(int x, int y, const c16 *s, u32 color) {
     while (*s) x += glyph(x, y, *s++, color);

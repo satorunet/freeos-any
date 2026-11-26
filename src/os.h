@@ -69,6 +69,7 @@ u32 *screen(void);                     /* 描画先 (SW x SH) */
 void screen_show(void);                /* 描画先を画面に出す */
 void desktop_compose(void);            /* デスクトップを描画先に描く (画面には出さない) */
 int glyph_bits(c16 ch, const u16 **bits); /* 文字の点の並び (16行) と幅 */
+const u8 *title_bitmap(c16 ch, int *w, int *adv, int *h); /* 起動画面の名前用の大きな文字 */
 void boot_splash(void);
 void sound_init(void);
 void sound_chime(void);

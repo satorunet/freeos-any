@@ -71,23 +71,15 @@ static void background(u32 *buf) {
     }
 }
 
-/* 文字を 2 倍の大きさで、縁をなめらかに描く */
+/* 名前の大きな文字 (BIZ UDPゴシック Bold) */
 static int big_glyph(int x, int y, c16 ch, u32 color, float alpha) {
-    const u16 *bits; int w = glyph_bits(ch, &bits);
-    for (int oy = 0; oy < 32; oy++) for (int ox = 0; ox < w * 2; ox++) {
-        float sx = (ox + 0.5f) / 2 - 0.5f, sy = (oy + 0.5f) / 2 - 0.5f;
-        int ix = (int)(sx + 1) - 1, iy = (int)(sy + 1) - 1;
-        float fx = sx - ix, fy = sy - iy, v = 0;
-        for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
-            int gx = ix + i, gy = iy + j;
-            if (gx < 0 || gy < 0 || gx >= w || gy >= 16 || !(bits[gy] & (0x8000 >> gx))) continue;
-            v += (i ? fx : 1 - fx) * (j ? fy : 1 - fy);
-        }
-        blend(x + ox, y + oy, color, smooth(0.2f, 0.65f, v) * alpha);
-    }
-    return w * 2;
+    int w, adv, h; const u8 *b = title_bitmap(ch, &w, &adv, &h);
+    if (!b) return 12;
+    for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) if (b[j * w + i]) blend(x + i - 1, y + j, color, b[j * w + i] / 255.0f * alpha);
+    return adv;
 }
-static int big_width(const c16 *s) { int w = 0; for (; *s; s++) { const u16 *b; w += glyph_bits(*s, &b) * 2 + 3; } return w - 3; }
+static int big_adv(c16 ch) { int w, adv, h; return title_bitmap(ch, &w, &adv, &h) ? adv : 12; }
+static int big_width(const c16 *s) { int w = 0; for (; *s; s++) w += big_adv(*s) + 1; return w - 1; }
 
 /* 1コマ描く。ms は開始からの時間 */
 static void frame(u32 *bg, float ms) {
@@ -164,9 +156,8 @@ static void frame(u32 *bg, float ms) {
     int tw = big_width(TITLE), tx = (SW - tw) / 2, ty = (int)(cy + size * 0.62f + 28);
     for (int i = 0; TITLE[i]; i++) {
         float t = ease_out(span(ms, 1150 + i * 45, 1500 + i * 45));
-        const u16 *b; int w = glyph_bits(TITLE[i], &b) * 2;
         if (t > 0) big_glyph(tx, ty + (int)((1 - t) * 14), TITLE[i], 0xFFFFFF, t);
-        tx += w + 3;
+        tx += big_adv(TITLE[i]) + 1;
     }
     /* 版 */
     float va = ease_out(span(ms, 1700, 2100));

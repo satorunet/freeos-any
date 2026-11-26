@@ -103,6 +103,8 @@ HTTPS は TLS 1.2 まで(TLS 1.3 専用のサイトは開けません)。証明�
 ## ビルド
 `make` (clang, lld-link, python3, GRUB の unicode.pf2)。
 `make image` は mkfs.fat と mtools も使います。`make vmzip` で Mac 版の zip を作ります。
-- 画面の文字は GNU Unifont (GPLv2+ フォント埋め込み例外 / OFL) を利用しています。
+- 画面の文字は [BIZ UDゴシック](https://github.com/googlefonts/morisawa-biz-ud-gothic) (SIL Open Font License 1.1、`third_party/bizud/OFL.txt`) をなめらかな文字にして使い、
+  それにない文字は GNU Unifont (GPLv2+ フォント埋め込み例外 / OFL) で描いています。
+  `make` には Pillow と fontTools も必要です (`PYTHON=` で Python を指定できます)。
 - `third_party/bearssl/` は BearSSL(MIT ライセンス、`LICENSE.txt` 参照。Debian のソースパッケージより)。
 - `third_party/trust_anchors.h` は `brssl ta` でシステムのルート証明書一覧から生成したものです。
