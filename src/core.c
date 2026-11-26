@@ -58,6 +58,12 @@ static int find_glyph(c16 ch) {
     }
     return -1;
 }
+int glyph_bits(c16 ch, const u16 **bits) {
+    int g = find_glyph(ch);
+    if (g < 0) g = find_glyph(u'?');
+    *bits = font_bits[g];
+    return font_width[g];
+}
 int charw(c16 ch) { int g = find_glyph(ch); return g < 0 ? 8 : font_width[g]; }
 int glyph(int x, int y, c16 ch, u32 color) {
     int g = find_glyph(ch);
@@ -358,7 +364,32 @@ static int task_width(void) {
     return w > 130 ? 130 : w;
 }
 
-static void draw(void) {
+/* マウスカーソル: 白地に黒い縁の矢印と、うすい影 */
+static const char *const arrow[] = {
+    "B...........", "BB..........", "BWB.........", "BWWB........", "BWWWB.......",
+    "BWWWWB......", "BWWWWWB.....", "BWWWWWWB....", "BWWWWWWWB...", "BWWWWWWWWB..",
+    "BWWWWWBBBBB.", "BWWBWWB.....", "BWB.BWWB....", "BB..BWWB....", "B....BWWB...",
+    ".....BWWB...", "......BWWB..", "......BWWB..", ".......BB...",
+};
+static void cursor_draw(int x0, int y0) {
+    for (int y = 0; y < 19; y++) for (int x = 0; x < 12; x++) { /* 影 */
+        int px = x0 + x + 1, py = y0 + y + 2;
+        if (arrow[y][x] == '.' || px < 0 || py < 0 || px >= SW || py >= SH) continue;
+        u32 *p = &back[py * SW + px];
+        *p = ((*p >> 2) & 0x3F3F3F) * 3; /* 25% 暗く */
+    }
+    for (int y = 0; y < 19; y++) for (int x = 0; x < 12; x++) {
+        char c = arrow[y][x];
+        if (c != '.') fill(x0 + x, y0 + y, 1, 1, c == 'B' ? 0x000000 : 0xFFFFFF);
+    }
+}
+
+u32 *screen(void) { return back; }
+void screen_show(void) { present(); }
+static void compose(void);
+void desktop_compose(void) { compose(); }
+static void draw(void) { compose(); present(); }
+static void compose(void) {
     noclip();
     for (int y = 0; y < SH; y++) { /* 壁紙 */
         u32 r = 24 + 90 * y / SH, g = 26 + 40 * y / SH, b = 62 + 100 * y / SH;
@@ -404,10 +435,7 @@ static void draw(void) {
         text(SW - w, SH - DOCK - 34, note, 0xFFFFFF);
     }
     if (menu) menu_draw();
-    if (hasPointer) {
-        for (int i = 0; i < 14; i++) { fill(mx, my + i, i * 2 / 3 + 2, 1, 0x000000); if (i > 0 && i < 12) fill(mx + 1, my + i, i * 2 / 3, 1, 0xFFFFFF); }
-    }
-    present();
+    if (hasPointer) cursor_draw(mx, my);
 }
 
 void redraw(void) { draw(); dirty = 1; }
@@ -530,10 +558,12 @@ Status efi_main(Handle image, SystemTable *st) {
     fs_init(image);
     pointer_init();
     tablet_init();
+    sound_init();
     net_init(image);
     wm_open(APP_TERM);
     if (fs_stat(u"\\README.TXT", 0)) edit_open(u"\\README.TXT");
     if (!fs_ready()) notify(u"保存先がありません。ファイル機能は使えません");
+    boot_splash();
 
     Event timer;
     BS->CreateEvent(0x80000000, 0, 0, 0, &timer);
@@ -546,6 +576,7 @@ Status efi_main(Handle image, SystemTable *st) {
         for (int i = 0; i < 16 && !ST->conIn->ReadKeyStroke(ST->conIn, &k); i++) key(k);
         pointer_poll();
         tablet_poll();
+        sound_poll();
         net_poll();
         for (int i = 0; i < nwin; i++) if (apps[order[i]].tick) apps[order[i]].tick();
         if (noteTicks && !--noteTicks) dirty = 1;
