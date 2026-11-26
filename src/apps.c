@@ -104,10 +104,11 @@ static void run(c16 *line) {
         print(u"ls [dir]      一覧           cd <dir>      移動\n"
               u"cat <file>    表示           edit <file>   編集\n"
               u"mkdir <dir>   フォルダ作成   rm <path>     ゴミ箱へ\n"
-              u"write <file> <text>  1行書く calc <式>     計算\n"
+              u"write <file> <text>  1行書く calc [式]     計算 (式なしで電卓)\n"
               u"get <URL> [名前]  ダウンロード   web <URL>  ブラウザで開く\n"
-              u"net date mem cls files solitaire about reboot shutdown");
-    } else if (seq(line, u"calc")) calc(arg);
+              u"net date mem cls files solitaire calc about reboot shutdown");
+    } else if (seq(line, u"calc") && !*arg) wm_open(APP_CALC); /* 式がなければ電卓を開く */
+    else if (seq(line, u"calc")) calc(arg);
     else if (seq(line, u"cls")) tcount = 0;
     else if (seq(line, u"files")) wm_open(APP_FILES);
     else if (seq(line, u"about")) wm_open(APP_ABOUT);
@@ -480,5 +481,6 @@ App apps[APP_COUNT] = {
     [APP_BROWSER]   = {u"ブラウザ", 720, 520, browser_open, browser_draw, browser_key, browser_click, 0, 0},
     [APP_TRANSFER]  = {u"ファイル転送", 440, 250, 0, transfer_draw, transfer_key, transfer_click, transfer_tick, transfer_stop},
     [APP_SOLITAIRE] = {u"ソリティア", 394, 480, solitaire_open, solitaire_draw, solitaire_key, solitaire_click, 0, 0},
+    [APP_CALC]  = {u"電卓", 340, 420, calc_open, calc_draw, calc_key, calc_click, calc_tick, 0},
     [APP_ABOUT] = {u"情報", 440, 220, about_open, about_draw, 0, 0, 0, 0},
 };

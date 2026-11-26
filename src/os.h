@@ -40,7 +40,7 @@ int utf8_decode(const u8 *in, u64 n, c16 *out, int cap);  /* 文字として読�
 int utf8_encode(const c16 *in, int n, u8 *out);
 
 /* ---- ウィンドウ ---- */
-enum { APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_ABOUT, APP_COUNT };
+enum { APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_CALC, APP_ABOUT, APP_COUNT };
 void wm_open(int app);
 void wm_close(int app);
 int wm_active(int app); /* 一番手前か */
@@ -85,4 +85,5 @@ void browser_open(void); void browser_draw(int x, int y, int w, int h); void bro
 void browser_go(const char *url);
 int download(const char *url, c16 *path);
 void transfer_draw(int x, int y, int w, int h); void transfer_key(Key k); void transfer_click(int x, int y); void transfer_tick(void); void transfer_stop(void);
+void calc_open(void); void calc_draw(int x, int y, int w, int h); void calc_key(Key k); void calc_click(int x, int y); void calc_tick(void);
 void solitaire_open(void); void solitaire_draw(int x, int y, int w, int h); void solitaire_key(Key k); void solitaire_click(int x, int y);

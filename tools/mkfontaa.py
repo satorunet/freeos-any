@@ -65,7 +65,7 @@ TITLE = 'FreeOS Any'
 big = ImageFont.truetype(title_ttf, 34)
 asc, desc = big.getmetrics()
 th = asc + desc
-tchars = sorted(set(TITLE))
+tchars = sorted(set(TITLE + '0123456789.,-+=%±×÷−eC←'))  # 名前と電卓の大きな文字
 toff, tdata, tinfo = [], bytearray(), []
 for ch in tchars:
     w = max(1, round(big.getlength(ch)))

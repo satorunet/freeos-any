@@ -18,7 +18,7 @@ build/font.h: tools/mkfont.py $(FONT)
 build/fontaa.h: tools/mkfontaa.py build/font.h $(BIZUD)/BIZUDGothic-Regular.ttf $(BIZUD)/BIZUDPGothic-Bold.ttf
 	$(PYTHON) tools/mkfontaa.py build/font.h $(BIZUD)/BIZUDGothic-Regular.ttf $(BIZUD)/BIZUDPGothic-Bold.ttf $@
 
-APP = core apps net http browser transfer solitaire virtio sound hda boot
+APP = core apps net http browser transfer solitaire virtio sound hda boot calc
 VER = 1.3
 # BearSSL はOS標準の機能(乱数・時計・SIMD)に頼らない設定でビルドする
 TLSFLAGS = -ffreestanding -mno-stack-arg-probe -fno-stack-protector -fno-builtin -O2 -w \
