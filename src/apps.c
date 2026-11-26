@@ -462,7 +462,7 @@ static void about_open(void) { cpu_name(cpu); megabytes = total_memory(); }
 static void about_draw(int x, int y, int w, int h) {
     (void)w; (void)h;
     c16 s[96] = u"メモリ: ";
-    text(x + 16, y + 14, u"FreeOS Any 1.3  (" ARCH u" / UEFI)", 0x1D1D27);
+    text(x + 16, y + 14, u"FreeOS Any " FREEOS_VER u"  (" ARCH u" / UEFI)", 0x1D1D27);
     text(x + 16, y + 44, u"CPU:", 0x55556A);
     text(x + 56, y + 44, cpu, 0x1D1D27);
     snum(s, megabytes, 0, 96); scat(s, u" MB", 96);

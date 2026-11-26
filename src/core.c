@@ -315,10 +315,15 @@ void fs_init(Handle image) {
 /* ---- ウィンドウ管理 ---- */
 #define TITLE 24
 #define DOCK 48
-typedef struct { int open, max, min, x, y; } Win; /* min: 最小化 (タスクバーのアイコンだけ) */
+typedef struct { int open, max, min, x, y, w, h; } Win; /* min: 最小化 (タスクバーのアイコンだけ) */
 static Win wins[APP_COUNT];
 static int order[APP_COUNT], nwin; /* 後ろほど手前 */
 static int dirty = 1, mx, my, mdown, drag = -1, dragx, dragy, hasPointer;
+/* サイズ変更中の窓と、つかんだ縁 (1 左 / 2 右 / 4 下) */
+static int resizing = -1, redges, rsx, rsy, rx0, ry0, rw0, rh0;
+static u64 lastClick; static int lastClickApp = -1;
+#define MINW 200
+#define MINH 120
 static c16 note[160];
 static int noteTicks;
 
@@ -339,6 +344,7 @@ void wm_open(int a) {
     if (!wins[a].open) {
         Win *w = &wins[a];
         w->open = 1; w->max = 0;
+        w->w = apps[a].w; w->h = apps[a].h;
         w->x = 40 + (a % 5) * 56; w->y = 24 + (a % 5) * 34;
         if (w->x + apps[a].w > SW) w->x = SW - apps[a].w > 0 ? SW - apps[a].w : 0;
         if (w->y + apps[a].h > SH - DOCK) w->y = 0;
@@ -373,8 +379,8 @@ void power(int reboot) {
 static void geometry(int a, int *x, int *y, int *w, int *h) {
     if (wins[a].max) { *x = 0; *y = 0; *w = SW; *h = SH - DOCK; return; }
     *x = wins[a].x; *y = wins[a].y;
-    *w = apps[a].w > SW ? SW : apps[a].w;
-    *h = apps[a].h > SH - DOCK ? SH - DOCK : apps[a].h;
+    *w = wins[a].w > SW ? SW : wins[a].w;
+    *h = wins[a].h > SH - DOCK ? SH - DOCK : wins[a].h;
 }
 /* アイコン (ARGB) を描く。size は 32 / 20 / 16 */
 #define ICON_LOGO (ICON_N - 1)
@@ -463,6 +469,25 @@ static void cursor_draw(int x0, int y0) {
     }
 }
 
+static int edge_at(int px, int py, int *app);
+/* サイズ変更のカーソル: 両矢印 (横 / 縦 / 斜め) */
+static void resize_cursor_draw(int cx, int cy, int e) {
+    int dx = (e & 3) ? 1 : 0, dy = (e & 4) ? 1 : 0;
+    if (dx && dy && (e & 1)) dx = -1; /* 左下の角は / の向き */
+    for (int pass = 0; pass < 2; pass++) {
+        u32 col = pass ? 0xFFFFFF : 0x000000; int t = pass ? 0 : 1;
+        for (int i = -8; i <= 8; i++) fill(cx + i * dx - t, cy + i * dy - t, 1 + 2 * t, 1 + 2 * t, col); /* 軸 */
+        for (int sgn = -1; sgn <= 1; sgn += 2) for (int k = 0; k < 5; k++) { /* 両端の矢じり */
+            int ex = cx + sgn * 8 * dx, ey = cy + sgn * 8 * dy;
+            int bx = -sgn * dx * k, by = -sgn * dy * k;
+            int px1 = ex + bx + (dy ? k : 0) * (dx ? 0 : 1), py1 = ey + by + (dx ? k : 0) * (dy ? 0 : 1);
+            int px2 = ex + bx - (dy ? k : 0) * (dx ? 0 : 1), py2 = ey + by - (dx ? k : 0) * (dy ? 0 : 1);
+            if (dx && dy) { px1 = ex + bx; py1 = ey; px2 = ex; py2 = ey + by; }
+            fill(px1 - t, py1 - t, 1 + 2 * t, 1 + 2 * t, col); fill(px2 - t, py2 - t, 1 + 2 * t, 1 + 2 * t, col);
+        }
+    }
+}
+
 u32 *screen(void) { return back; }
 void screen_show(void) { present(); }
 static void compose(void);
@@ -474,7 +499,7 @@ static void compose(void) {
         u32 r = 24 + 90 * y / SH, g = 26 + 40 * y / SH, b = 62 + 100 * y / SH;
         fill(0, y, SW, 1, r << 16 | g << 8 | b);
     }
-    text(SW - 120, 16, u"FreeOS Any 1.3", 0xB8B8E0);
+    text(SW - 120, 16, u"FreeOS Any " FREEOS_VER, 0xB8B8E0);
     if (!nwin) text(24, 24, u"Esc かスタートボタンでメニューを開きます", 0xFFFFFF);
     for (int i = 0; i < nwin; i++) {
         int a = order[i], x, y, w, h, top = a == top_app();
@@ -488,6 +513,15 @@ static void compose(void) {
         text(x + 28, y + 4, apps[a].title, 0xFFFFFF);
         text(x + w - 18, y + 4, u"×", 0xFFFFFF);
         fill(x + w - 45, y + 12, 10, 2, 0xFFFFFF); /* 最小化 */
+        if (wins[a].max) { /* 元に戻す: 重なった四角 */
+            fill(x + w - 66, y + 7, 8, 1, 0xFFFFFF); fill(x + w - 59, y + 7, 1, 8, 0xFFFFFF);
+            fill(x + w - 69, y + 9, 9, 1, 0xFFFFFF); fill(x + w - 69, y + 17, 9, 1, 0xFFFFFF);
+            fill(x + w - 69, y + 9, 1, 9, 0xFFFFFF); fill(x + w - 61, y + 9, 1, 9, 0xFFFFFF);
+        } else { /* 最大化: 四角 */
+            fill(x + w - 70, y + 7, 11, 1, 0xFFFFFF); fill(x + w - 70, y + 8, 11, 1, 0xFFFFFF);
+            fill(x + w - 70, y + 17, 11, 1, 0xFFFFFF);
+            fill(x + w - 70, y + 7, 1, 11, 0xFFFFFF); fill(x + w - 60, y + 7, 1, 11, 0xFFFFFF);
+        }
         clip(x + 1, y + TITLE, w - 2, h - TITLE - 1);
         apps[a].draw(x + 1, y + TITLE, w - 2, h - TITLE - 1);
     }
@@ -527,10 +561,32 @@ static void compose(void) {
         text(SW - w, SH - DOCK - 34, note, 0xFFFFFF);
     }
     if (menu) menu_draw();
-    if (hasPointer) cursor_draw(mx, my);
+    if (hasPointer) {
+        int ea, e = resizing >= 0 ? redges : drag < 0 && !menu ? edge_at(mx, my, &ea) : 0;
+        if (e) resize_cursor_draw(mx, my, e); else cursor_draw(mx, my);
+    }
 }
 
 void redraw(void) { draw(); dirty = 1; }
+/* マウスの下の窓の縁 (1 左 / 2 右 / 4 下)。a に窓を返す */
+static int edge_at(int px, int py, int *app) {
+    for (int i = nwin - 1; i >= 0; i--) {
+        int a = order[i], x, y, w, h;
+        if (wins[a].min) continue;
+        geometry(a, &x, &y, &w, &h);
+        if (px < x - 4 || py < y || px >= x + w + 4 || py >= y + h + 4) continue;
+        if (wins[a].max) return 0;
+        int e = 0;
+        if (py >= y + TITLE) { if (px < x + 4) e |= 1; if (px >= x + w - 4) e |= 2; }
+        if (py >= y + h - 4) e |= 4;
+        if ((e & 4) && px < x + 12) e |= 1;          /* 下の角は少し広く */
+        if ((e & 4) && px >= x + w - 12) e |= 2;
+        if (e) *app = a;
+        return e;
+    }
+    return 0;
+}
+static void toggle_max(int a) { wins[a].max ^= 1; dirty = 1; }
 static void press(void) {
     if (menu) {
         int i = (my - menu_y() - 4) / MENU_ROW;
@@ -544,6 +600,13 @@ static void press(void) {
         if (a >= 0) dock_press(a);
         return;
     }
+    int ea, e = edge_at(mx, my, &ea);
+    if (e) { /* 縁をつかんでサイズ変更 */
+        raise(ea);
+        resizing = ea; redges = e; rsx = mx; rsy = my;
+        rx0 = wins[ea].x; ry0 = wins[ea].y; rw0 = wins[ea].w; rh0 = wins[ea].h;
+        return;
+    }
     for (int i = nwin - 1; i >= 0; i--) {
         int a = order[i], x, y, w, h;
         if (wins[a].min) continue;
@@ -551,8 +614,12 @@ static void press(void) {
         if (mx < x || my < y || mx >= x + w || my >= y + h) continue;
         raise(a);
         if (my < y + TITLE) {
+            u64 now = net_ms();
+            int dbl = lastClickApp == a && now - lastClick < 400;
+            lastClick = now; lastClickApp = a;
             if (mx >= x + w - 26) wm_close(a);
             else if (mx >= x + w - 52) wm_minimize(a);
+            else if (mx >= x + w - 78 || dbl) { toggle_max(a); lastClickApp = -1; }
             else if (!wins[a].max) { drag = a; dragx = mx - x; dragy = my - y; }
         } else if (apps[a].click) apps[a].click(mx - x - 1, my - y - TITLE);
         return;
@@ -565,7 +632,15 @@ static void pointer_update(int x, int y, int down) {
     mx = x; my = y;
     if (menu && mx < MENU_W && my >= menu_y() + 4 && my < menu_y() + 4 + MENU_N * MENU_ROW) msel = (my - menu_y() - 4) / MENU_ROW;
     if (down && !mdown) press();
-    if (!down) drag = -1;
+    if (!down) drag = resizing = -1;
+    if (resizing >= 0) {
+        Win *w = &wins[resizing];
+        int dx = mx - rsx, dy = my - rsy;
+        if (redges & 2) w->w = rw0 + dx < MINW ? MINW : rw0 + dx > SW ? SW : rw0 + dx;
+        if (redges & 1) { int nw = rw0 - dx < MINW ? MINW : rw0 - dx; w->x = rx0 + rw0 - nw; w->w = nw; }
+        if (redges & 4) w->h = rh0 + dy < MINH ? MINH : ry0 + rh0 + dy > SH - DOCK ? SH - DOCK - ry0 : rh0 + dy;
+        dirty = 1;
+    }
     if (drag >= 0) {
         int nx = mx - dragx, ny = my - dragy;
         wins[drag].x = nx < 60 - apps[drag].w ? 60 - apps[drag].w : nx > SW - 60 ? SW - 60 : nx;
@@ -627,7 +702,7 @@ static void key(Key k) {
     if (k.scan == 0x0B) { if (nwin > 1) raise(order[0]); }               /* F1 */
     else if (k.scan == 0x0E) { if (top >= 0) wm_close(top); }            /* F4 */
     else if (k.scan >= 0x0F && k.scan <= 0x13) wm_open(k.scan - 0x0F);   /* F5-F9 */
-    else if (k.scan == 0x14) { if (top >= 0) wins[top].max ^= 1; }       /* F10 */
+    else if (k.scan == 0x14) { if (top >= 0) toggle_max(top); }          /* F10 */
     else if (top >= 0 && apps[top].key) apps[top].key(k);
 }
 
