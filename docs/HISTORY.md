@@ -5,6 +5,7 @@
 
 | 版 | 内容 |
 |---|---|
+| [v2.5](history/v2.5/README.md) | Mac アプリ版 (QEMU なしで動く) |
 | [v2.4](history/v2.4/README.md) | AI が入っている前提の OS に (Qwen3-1.7B) |
 | [v2.3](history/v2.3/README.md) | JavaScript の文法をひととおり、読み込み中も動く画面 |
 | [v2.2](history/v2.2/README.md) | 「かな」「英数」キー、ブラウザの安定化、クッキー |

@@ -15,6 +15,11 @@ Windows も Linux も使いません。
 | Intel Mac | USB から直接起動(実機未確認) |
 | Apple シリコン Mac (M1 以降) | **仮想マシンのみ**(下の Mac 版や UTM)。Mac の仕組み上、直接起動はできない |
 
+## Mac アプリ版 (QEMU なし)
+`make mac-app` で `build/mac/FreeOS Any.app` ができます (Apple の clang と Cocoa)。仮想マシンを使わずに Mac の窓の中で動きます。
+ファイルは `~/Library/Application Support/FreeOS Any/disk`、通信は macOS の HTTPS を使います。
+AI のモデルはアプリの `Contents/Resources/AI/` か、環境変数 `FREEOS_MODEL_DIR` のフォルダに置きます。
+
 ## macOS / Windows の上で動かす
 いつもの OS を起動したまま、窓の中で動かします。仮想化ソフト [QEMU](https://www.qemu.org/) を使います(同梱していません)。
 

@@ -24,7 +24,7 @@ build/icons.h: tools/mkicons.py tools/logo.py $(BIZUD)/BIZUDPGothic-Bold.ttf
 	$(PYTHON) tools/mkicons.py $(BIZUD)/BIZUDPGothic-Bold.ttf $@
 
 APP = core apps net http cookie regex js browser transfer solitaire virtio sound hda boot calc llm chat vkbd
-VER = 2.4
+VER = 2.5
 # BearSSL はOS標準の機能(乱数・時計・SIMD)に頼らない設定でビルドする
 TLSFLAGS = -ffreestanding -mno-stack-arg-probe -fno-stack-protector -fno-builtin -O2 -w \
   -Isrc/libc -Ithird_party/bearssl/inc -Ithird_party/bearssl/src \
@@ -82,7 +82,30 @@ dmg: image
 srcdoc:
 	python3 tools/mksrc.py $(VER)
 
+# Mac アプリ版 (QEMU なしで動く): build/mac/FreeOS Any.app。Apple の clang を使う
+MACCC = /usr/bin/clang
+MACSRC = $(filter-out net http,$(APP))
+MACFLAGS = -O2 -Isrc -Ibuild -fno-builtin -Wall -Wno-unused-function -Wno-sign-compare -Wno-incompatible-library-redeclaration -mmacosx-version-min=11.0
+MACAPP = build/mac/FreeOS Any.app
+build/mac/%.o: src/%.c $(HDRS)
+	@mkdir -p build/mac
+	$(MACCC) $(MACFLAGS) -c $< -o $@
+build/mac/host_%.o: mac/host_%.c mac/host.h src/net.h
+	@mkdir -p build/mac
+	$(MACCC) $(MACFLAGS) -c $< -o $@
+build/mac/host_mac.o: mac/host_mac.m mac/host.h
+	@mkdir -p build/mac
+	$(MACCC) -O2 -fobjc-arc -mmacosx-version-min=11.0 -c $< -o $@
+build/mac/FreeOSAny: $(MACSRC:%=build/mac/%.o) build/mac/host_efi.o build/mac/host_net.o build/mac/host_mac.o
+	$(MACCC) -mmacosx-version-min=11.0 -framework Cocoa -o $@ $^
+mac-app: build/mac/FreeOSAny
+	rm -rf "$(MACAPP)"; mkdir -p "$(MACAPP)/Contents/MacOS" "$(MACAPP)/Contents/Resources/samples"
+	cp build/mac/FreeOSAny "$(MACAPP)/Contents/MacOS/"
+	cp samples/* "$(MACAPP)/Contents/Resources/samples/"
+	$(PYTHON) tools/mkmacapp.py "$(MACAPP)" $(VER)
+	@echo "$(MACAPP)"
+
 clean:
 	rm -rf build
 
-.PHONY: all image image-mac run-mac vmzip dmg srcdoc clean
+.PHONY: all image image-mac run-mac vmzip dmg srcdoc clean mac-app
