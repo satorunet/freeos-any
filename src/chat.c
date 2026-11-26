@@ -4,7 +4,12 @@
 #include "llm.h"
 #include "net.h"
 
-#define MODEL_PATH u"\\AI\\qwen3-0.6b.fqw"
+/* 探す順: 賢い 1.7B、なければ軽い 0.6B */
+static const c16 *const modelPaths[] = {u"\\AI\\qwen3-1.7b.fqw", u"\\AI\\qwen3-0.6b.fqw"};
+static const c16 *const modelNames[] = {u"Qwen3-1.7B", u"Qwen3-0.6B"};
+static int modelIdx;
+static c16 pendingAsk[300]; /* 読み込み中に頼まれた質問 */
+static void send(void);
 #define LOGMAX 24000
 #define MSGMAX 64
 static c16 logbuf[LOGMAX]; static int loglen;
@@ -33,15 +38,17 @@ static void msg_addz(const c16 *s) { while (*s) msg_add(*s++); }
 static void in_add(c16 c) { if (ilen < 398) input[ilen++] = c; }
 
 static void load_model(void) {
-    Entry e;
-    if (!fs_stat(MODEL_PATH, &e) || e.size < 1024) {
+    Entry e; int found = 0;
+    for (modelIdx = 0; modelIdx < 2 && !found; modelIdx++) found = fs_stat(modelPaths[modelIdx], &e) && e.size > 1024;
+    modelIdx--;
+    if (!found) {
         state = 9;
-        scopy(note, u"モデルがありません: HOME\\AI\\qwen3-0.6b.fqw を置いてください", 120);
+        scopy(note, u"モデルがありません: HOME\\AI\\qwen3-1.7b.fqw (か qwen3-0.6b.fqw) を置いてください", 120);
         return;
     }
     u8 *buf;
     if (BS->AllocatePool(2, e.size, (void **)&buf)) { state = 9; scopy(note, u"メモリが足りません (仮想マシンは 1GB 以上に)", 120); return; }
-    if (fs_read(MODEL_PATH, buf, e.size) != (i64)e.size) { state = 9; scopy(note, u"モデルを読めません", 120); return; }
+    if (fs_read(modelPaths[modelIdx], buf, e.size) != (i64)e.size) { state = 9; scopy(note, u"モデルを読めません", 120); return; }
     if (!llm_load(buf, e.size)) {
         state = 9; note[0] = 0;
         const char *m = llm_error(); int k = 0; u64 i = 0, n = 0; while (m[n]) n++;
@@ -50,7 +57,14 @@ static void load_model(void) {
     }
     state = 2;
     scopy(note, llm_has_avx2() ? u"準備できました (AVX2)" : u"準備できました (AVX2 なし: ゆっくり)", 120);
-    if (!nmsg) { msg_new(0); msg_addz(u"こんにちは。Qwen3-0.6B です。この PC の中だけで動いています。何でも聞いてください。"); }
+    if (!nmsg) { msg_new(0); msg_addz(u"こんにちは。"); msg_addz(modelNames[modelIdx]); msg_addz(u" です。この PC の中だけで動いています。何でも聞いてください。"); }
+    if (pendingAsk[0]) { for (int i = 0; pendingAsk[i]; i++) in_add(pendingAsk[i]); pendingAsk[0] = 0; send(); }
+}
+/* ほかのアプリ (ターミナルの ai コマンド) から質問を送る */
+void chat_ask(const c16 *q) {
+    wm_open(APP_AI);
+    if (state == 2) { ilen = 0; for (int i = 0; q[i] && ilen < 398; i++) input[ilen++] = q[i]; send(); }
+    else { scopy(pendingAsk, q, 300); }
 }
 void chat_open(void) { if (state == 0) { state = 1; scopy(note, u"モデルを読み込んでいます… (数秒〜数十秒)", 120); } }
 

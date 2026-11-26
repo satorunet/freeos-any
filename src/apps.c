@@ -105,9 +105,11 @@ static void run(c16 *line) {
               u"cat <file>    表示           edit <file>   編集\n"
               u"mkdir <dir>   フォルダ作成   rm <path>     ゴミ箱へ\n"
               u"write <file> <text>  1行書く calc [式]     計算 (式なしで電卓)\n"
+              u"ai [質問]     AI に聞く (F11 で AI チャット)\n"
               u"get <URL> [名前]  ダウンロード   web <URL>  ブラウザで開く\n"
               u"net date mem cls files solitaire calc about reboot shutdown");
-    } else if (seq(line, u"calc") && !*arg) wm_open(APP_CALC); /* 式がなければ電卓を開く */
+    } else if (seq(line, u"ai")) { if (*arg) chat_ask(arg); else wm_open(APP_AI); } /* AI に聞く */
+    else if (seq(line, u"calc") && !*arg) wm_open(APP_CALC); /* 式がなければ電卓を開く */
     else if (seq(line, u"calc")) calc(arg);
     else if (seq(line, u"cls")) tcount = 0;
     else if (seq(line, u"files")) wm_open(APP_FILES);

@@ -191,10 +191,15 @@ i64 fs_read(const c16 *path, u8 *buf, u64 cap) {
     if (!fs_stat(path, &e) || e.dir || e.size > cap) return -1;
     File *f = fs_open(path, FILE_READ, 0);
     if (!f) return -1;
-    u64 n = cap;
-    Status s = f->Read(f, &n, buf);
+    u64 done = 0; Status s = 0;
+    while (done < e.size) { /* 大きなファイル (AI のモデル) は 8MB ずつ読む。一度に読むと失敗する環境がある */
+        u64 n = e.size - done > (8u << 20) ? (8u << 20) : e.size - done;
+        s = f->Read(f, &n, buf + done);
+        if (s || !n) break;
+        done += n;
+    }
     f->Close(f);
-    return s || n != e.size ? -1 : (i64)n;
+    return s || done != e.size ? -1 : (i64)done;
 }
 int fs_delete(const c16 *path) {
     File *f = fs_open(path, FILE_READ | FILE_WRITE, 0);
@@ -415,11 +420,14 @@ static void fill_round(int x, int y, int w, int h, int r, u32 color) {
 #define MENU_ROW 30
 #define START_W 112
 static int menu, msel;
-static const c16 *menuKey[APP_COUNT] = {u"F5", u"F6", u"F7", u"F8", u"F9"};
+static const c16 *menuKey[APP_COUNT] = {u"F5", u"F6", u"F7", u"F8", u"F9", [APP_AI] = u"F11"};
+/* 並べる順 (AI が先頭) */
+static const int shown[APP_COUNT] = {APP_AI, APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_CALC, APP_ABOUT};
+static int pos_of(int a) { for (int i = 0; i < APP_COUNT; i++) if (shown[i] == a) return i; return a; }
 static int menu_y(void) { return SH - DOCK - MENU_N * MENU_ROW - 10; }
 static void menu_run(int i) {
     menu = 0; dirty = 1;
-    if (i < APP_COUNT) wm_open(i);
+    if (i < APP_COUNT) wm_open(shown[i]);
     else power(i == APP_COUNT);
 }
 static void menu_draw(void) {
@@ -430,17 +438,18 @@ static void menu_draw(void) {
         int py = y + 4 + i * MENU_ROW;
         if (i == msel) fill(7, py, MENU_W - 6, MENU_ROW, 0x6D5DFC);
         if (i == APP_COUNT) fill(12, py, MENU_W - 16, 1, 0x55556A);
-        if (i < APP_COUNT) icon_draw(i, 20, 14, py + 5);
-        text(i < APP_COUNT ? 44 : 20, py + 7, i < APP_COUNT ? apps[i].title : i == APP_COUNT ? u"再起動" : u"シャットダウン", 0xFFFFFF);
-        if (i < APP_COUNT && menuKey[i]) text(MENU_W - 28, py + 7, menuKey[i], 0xB0B0D0);
+        int a = i < APP_COUNT ? shown[i] : -1;
+        if (a >= 0) icon_draw(a, 20, 14, py + 5);
+        text(a >= 0 ? 44 : 20, py + 7, a >= 0 ? apps[a].title : i == APP_COUNT ? u"再起動" : u"シャットダウン", 0xFFFFFF);
+        if (a >= 0 && menuKey[a]) text(MENU_W - (menuKey[a][2] ? 36 : 28), py + 7, menuKey[a], 0xB0B0D0);
     }
 }
 /* タスクバー: すべてのアプリのアイコンを並べる */
 #define SLOT 48
-static int slot_x(int a) { return START_W + 8 + a * SLOT; }
+static int slot_x(int a) { return START_W + 8 + pos_of(a) * SLOT; }
 static int slot_at(int x, int y) {
     if (y < SH - DOCK) return -1;
-    for (int a = 0; a < APP_COUNT; a++) if (x >= slot_x(a) && x < slot_x(a) + SLOT) return a;
+    for (int a = 0; a < APP_COUNT; a++) if (x >= slot_x(a) && x < slot_x(a) + SLOT) return a; /* 位置は shown の順 */
     return -1;
 }
 /* アイコンを押したとき: 起動していなければ起動、裏なら手前へ、手前なら最小化 */
@@ -767,6 +776,7 @@ static void key(Key k) {
     else if (k.scan == 0x0E) { if (top >= 0 && top != busyApp) wm_close(top); } /* F4 (通信中は閉じない) */
     else if (k.scan >= 0x0F && k.scan <= 0x13) wm_open(k.scan - 0x0F);   /* F5-F9 */
     else if (k.scan == 0x14) { if (top >= 0) toggle_max(top); }          /* F10 */
+    else if (k.scan == 0x15) wm_open(APP_AI);                            /* F11: AI チャット */
     else if (top >= 0 && apps[top].key) apps[top].key(k);
 }
 
@@ -817,7 +827,7 @@ Status efi_main(Handle image, SystemTable *st) {
     sound_init();
     net_init(image);
     wm_open(APP_TERM);
-    if (fs_stat(u"\\README.TXT", 0)) edit_open(u"\\README.TXT");
+    wm_open(APP_AI); /* AI は最初から */
     if (!fs_ready()) notify(u"保存先がありません。ファイル機能は使えません");
     boot_splash();
 

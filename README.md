@@ -95,12 +95,13 @@ HTTPS は TLS 1.2 まで(TLS 1.3 専用のサイトは開けません)。証明�
 
 ## AI チャット (Qwen3-0.6B)
 OS の中だけで動く AI と日本語で会話できます (通信しません)。Intel / AMD (AVX2) なら速く、それ以外は遅いですが動きます。
-メモリは 1GB 以上必要です (Mac 版は 1.5GB を割り当てます)。モデルは大きいので同梱していません。作り方:
+メモリは 1.7B なら 2GB、0.6B なら 1GB 以上必要です (Mac 版は 2GB を割り当てます)。F11 でどこからでも開けます。モデルは大きいので同梱していません。作り方:
 
 ```
 # Qwen/Qwen3-0.6B (Apache-2.0) の config.json, tokenizer.json, model.safetensors を models/qwen3-0.6b に置いて
-python3 tools/export_qwen3.py models/qwen3-0.6b qwen3-0.6b.fqw      # 約 400MB (重み 4 ビット)
-# 起動ディスクの HOME/AI/qwen3-0.6b.fqw に置く。Mac なら: MODEL=qwen3-0.6b.fqw make image-mac
+python3 tools/export_qwen3.py models/qwen3-1.7b qwen3-1.7b.fqw      # 約 1.1GB (重み 4 ビット)。0.6B なら約 400MB
+# 元データを置かずに Hugging Face から直接: --url=https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main
+# 起動ディスクの HOME/AI/ に置く (qwen3-1.7b.fqw を優先、なければ qwen3-0.6b.fqw)。Mac なら: MODEL=qwen3-1.7b.fqw make image-mac
 ```
 
 - エンジンは `src/llm.c` (C、1 コア、AVX2 で 4 ビット×8 ビット)。設計は [llm.asm](https://github.com/alesha-pro/llm.asm) (MIT) を参考にした
