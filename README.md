@@ -93,6 +93,21 @@ HTTPS は TLS 1.2 まで(TLS 1.3 専用のサイトは開けません)。証明�
 同じ名前がある場合は別名で保存します。**通信は暗号化されません。** 信頼できる LAN だけで使い、
 終わったら停止してください。ウィンドウを閉じても停止します。
 
+## AI チャット (Qwen3-0.6B)
+OS の中だけで動く AI と日本語で会話できます (通信しません)。Intel / AMD (AVX2) なら速く、それ以外は遅いですが動きます。
+メモリは 1GB 以上必要です (Mac 版は 1.5GB を割り当てます)。モデルは大きいので同梱していません。作り方:
+
+```
+# Qwen/Qwen3-0.6B (Apache-2.0) の config.json, tokenizer.json, model.safetensors を models/qwen3-0.6b に置いて
+python3 tools/export_qwen3.py models/qwen3-0.6b qwen3-0.6b.fqw      # 約 400MB (重み 4 ビット)
+# 起動ディスクの HOME/AI/qwen3-0.6b.fqw に置く。Mac なら: MODEL=qwen3-0.6b.fqw make image-mac
+```
+
+- エンジンは `src/llm.c` (C、1 コア、AVX2 で 4 ビット×8 ビット)。設計は [llm.asm](https://github.com/alesha-pro/llm.asm) (MIT) を参考にした
+- 覚えていられるのは 512 トークンまで。超えたら会話を忘れて続ける
+- 0.6B の小さなモデルなので、事実をよく間違えます (「日本の首都は?」に「大阪」と答えるなど。元の精度の計算でも同じ)
+- `tests/llmtest.c` で Mac / Linux の上で直接試せる
+
 ## 仕組みと限界
 - 画面描画、ウィンドウ管理、シェル、エディタ、かな入力、TCP/IP、HTTP、ブラウザ表示、
   ファイル転送サーバーは自作です。暗号(TLS)は [BearSSL](https://bearssl.org/) 0.6 を使っています。

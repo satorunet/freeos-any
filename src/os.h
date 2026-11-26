@@ -40,7 +40,7 @@ int utf8_decode(const u8 *in, u64 n, c16 *out, int cap);  /* 文字として読�
 int utf8_encode(const c16 *in, int n, u8 *out);
 
 /* ---- ウィンドウ ---- */
-enum { APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_CALC, APP_ABOUT, APP_COUNT };
+enum { APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_CALC, APP_AI, APP_ABOUT, APP_COUNT };
 void wm_open(int app);
 void wm_close(int app);
 int wm_active(int app); /* 一番手前か */
@@ -63,9 +63,10 @@ typedef struct {
 } App;
 extern App apps[APP_COUNT];
 void edit_open(const c16 *path);
+void kana_feed(c16 c, void (*out)(c16)); void kana_flush(void (*out)(c16)); int kana_pending(c16 *out); /* ローマ字かな入力 */
 
 /* ---- 起動アニメーションと起動音 ---- */
-#define FREEOS_VER u"2.0"
+#define FREEOS_VER u"2.1"
 u32 *screen(void);                     /* 描画先 (SW x SH) */
 void screen_show(void);                /* 描画先を画面に出す */
 void desktop_compose(void);            /* デスクトップを描画先に描く (画面には出さない) */
@@ -87,5 +88,6 @@ void browser_open(void); void browser_draw(int x, int y, int w, int h); void bro
 void browser_go(const char *url); void browser_tick(void); void browser_wheel(int dy); void browser_open_file(const c16 *path);
 int download(const char *url, c16 *path);
 void transfer_draw(int x, int y, int w, int h); void transfer_key(Key k); void transfer_click(int x, int y); void transfer_tick(void); void transfer_stop(void);
+void chat_open(void); void chat_draw(int x, int y, int w, int h); void chat_key(Key k); void chat_click(int x, int y); void chat_tick(void); void chat_wheel(int dy);
 void calc_open(void); void calc_draw(int x, int y, int w, int h); void calc_key(Key k); void calc_click(int x, int y); void calc_tick(void);
 void solitaire_open(void); void solitaire_draw(int x, int y, int w, int h); void solitaire_key(Key k); void solitaire_click(int x, int y);

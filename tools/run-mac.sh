@@ -6,7 +6,7 @@ SHARE="$(dirname "$QEMU")/../share/qemu"
 mkdir -p build/vm
 [ -f build/vm/vars.fd ] || cp "$SHARE/edk2-i386-vars.fd" build/vm/vars.fd
 chmod u+w build/vm/vars.fd
-exec "$QEMU" -name "FreeOS Any (開発)" -m 512 -machine q35 -accel hvf -cpu host,-pdpe1gb \
+exec "$QEMU" -name "FreeOS Any (開発)" -m 1536 -machine q35 -accel hvf -cpu host,-pdpe1gb \
   -drive "if=pflash,format=raw,readonly=on,file=$SHARE/edk2-x86_64-code.fd" \
   -drive if=pflash,format=raw,file=build/vm/vars.fd \
   -drive if=none,id=disk,format=raw,file=build/freeos-any.img -device virtio-blk-pci,drive=disk \

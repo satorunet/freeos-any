@@ -346,17 +346,20 @@ static const struct { const char *r; const c16 *k; } table[] = {
     R("-", "ー") R(",", "、") R(".", "。")
 };
 #define NTABLE (int)(sizeof table / sizeof *table)
-static void emit(const c16 *s) { while (*s) insert(*s++); }
+/* かな入力の結果の行き先 (ふだんはエディター。チャットなども使う) */
+static void (*ksink)(c16);
+static void kput(c16 c) { if (ksink) ksink(c); else insert(c); }
+static void emit(const c16 *s) { while (*s) kput(*s++); }
 static void flush_romaji(void) {
-    if ((nroma == 1 || (nroma == 2 && romaji[1] == u'n')) && romaji[0] == u'n') insert(u'ん');
-    else for (int i = 0; i < nroma; i++) insert(romaji[i]);
+    if ((nroma == 1 || (nroma == 2 && romaji[1] == u'n')) && romaji[0] == u'n') kput(u'ん');
+    else for (int i = 0; i < nroma; i++) kput(romaji[i]);
     nroma = 0;
 }
 static void kana_input(c16 c) {
     if (c >= u'A' && c <= u'Z') c += 32;
     /* "nn" は次の文字を見て決める: konnichiha→こんにちは, honn→ほん */
     if (nroma == 2 && romaji[0] == u'n' && romaji[1] == u'n') {
-        insert(u'ん');
+        kput(u'ん');
         if (c == u'a' || c == u'i' || c == u'u' || c == u'e' || c == u'o') nroma = 1;
         else nroma = 0;
     }
@@ -372,12 +375,17 @@ static void kana_input(c16 c) {
             prefix = 1;
         }
         if (prefix) return;
-        if (nroma >= 2 && romaji[0] == u'n') insert(u'ん');
-        else if (nroma >= 2 && romaji[0] == romaji[1] && romaji[0] >= u'a' && romaji[0] <= u'z') insert(u'っ');
-        else insert(romaji[0]);
+        if (nroma >= 2 && romaji[0] == u'n') kput(u'ん');
+        else if (nroma >= 2 && romaji[0] == romaji[1] && romaji[0] >= u'a' && romaji[0] <= u'z') kput(u'っ');
+        else kput(romaji[0]);
         mcopy(romaji, romaji + 1, (--nroma) * 2);
     }
 }
+
+/* ほかのアプリから使う: c を入れる / 残りを出す / 変換待ちのローマ字 */
+void kana_feed(c16 c, void (*out)(c16)) { ksink = out; kana_input(c); ksink = 0; }
+void kana_flush(void (*out)(c16)) { ksink = out; flush_romaji(); ksink = 0; }
+int kana_pending(c16 *out) { for (int i = 0; i < nroma; i++) out[i] = romaji[i]; out[nroma] = 0; return nroma; }
 
 static int line_start(int p) { while (p > 0 && ebuf[p - 1] != u'\n') p--; return p; }
 static int line_end(int p) { while (p < elen && ebuf[p] != u'\n') p++; return p; }
@@ -485,5 +493,6 @@ App apps[APP_COUNT] = {
     [APP_TRANSFER]  = {u"ファイル転送", 440, 250, 0, transfer_draw, transfer_key, transfer_click, transfer_tick, transfer_stop, 0},
     [APP_SOLITAIRE] = {u"ソリティア", 394, 480, solitaire_open, solitaire_draw, solitaire_key, solitaire_click, 0, 0, 0},
     [APP_CALC]  = {u"電卓", 340, 420, calc_open, calc_draw, calc_key, calc_click, calc_tick, 0, 0},
+    [APP_AI]    = {u"AI チャット", 560, 520, chat_open, chat_draw, chat_key, chat_click, chat_tick, 0, chat_wheel},
     [APP_ABOUT] = {u"情報", 440, 220, about_open, about_draw, 0, 0, 0, 0, 0},
 };

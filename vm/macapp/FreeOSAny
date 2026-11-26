@@ -103,7 +103,7 @@ PORT=8080
 while [ $PORT -lt 8100 ] && (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; do PORT=$((PORT + 1)); done
 
 run() { # 引数: CPU の指定
-    "$QEMU" -name "FreeOS Any  (ファイル転送: localhost:$PORT)" -m 512 "$@" "${MACHINE[@]}" \
+    "$QEMU" -name "FreeOS Any  (ファイル転送: localhost:$PORT)" -m 1536 "$@" "${MACHINE[@]}" \
         -drive "if=pflash,format=raw,readonly=on,file=fw-$ARCH-code.fd" \
         -drive "if=pflash,format=raw,file=fw-$ARCH-vars.fd" \
         -drive "if=none,id=disk,format=raw,file=freeos-any.img" \

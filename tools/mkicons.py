@@ -110,6 +110,23 @@ def calc():
     return img
 
 
+def ai():
+    """AI チャット: 夜空色に吹き出しと虹色の ∞"""
+    import math
+    img, d = base((44, 40, 74), (16, 15, 28))
+    d.rounded_rectangle((40, 56, 216, 176), 40, fill=(255, 255, 255, 255))
+    d.polygon([(70, 168), (60, 214), (112, 172)], fill=(255, 255, 255, 255))
+    cols = [(150, 130, 255), (109, 93, 252), (236, 120, 220), (255, 190, 90), (150, 130, 255)]
+    for i in range(900):
+        t = i / 900 * 2 * math.pi
+        s_, c_ = math.sin(t), math.cos(t); dd = 1 + s_ * s_
+        x, y = 128 + 64 * c_ / dd, 116 + 64 * s_ * c_ / dd
+        u = t / (2 * math.pi) * 4; k = min(int(u), 3); f = u - k
+        col = tuple(int(cols[k][j] * (1 - f) + cols[k + 1][j] * f) for j in range(3))
+        d.ellipse((x - 11, y - 11, x + 11, y + 11), fill=col + (255,))
+    return img
+
+
 def about():
     img, d = base(hexc(0x38BDF8), hexc(0x0284C7))
     d.ellipse((50, 50, 206, 206), outline=WHITE, width=14)
@@ -125,7 +142,7 @@ def logo():
     return draw_logo(S, text=False)
 
 
-ICONS = [terminal, files, editor, browser, transfer, solitaire, calc, about, logo]
+ICONS = [terminal, files, editor, browser, transfer, solitaire, calc, ai, about, logo]
 
 with open(out, 'w') as f:
     f.write('/* 自動生成: tools/mkicons.py (アプリのアイコン、1点 ARGB) */\n')
