@@ -9,7 +9,7 @@
 #define MSGMAX 64
 static c16 logbuf[LOGMAX]; static int loglen;
 static struct { int start, len, user; } msg[MSGMAX]; static int nmsg;
-static c16 input[400]; static int ilen, kanaMode;
+static c16 input[400]; static int ilen, kanaMode = 1; /* 最初からかな入力 */
 static int state; /* 0 未読み込み 1 読み込み待ち 2 準備できた 3 返事中 9 使えない */
 static c16 note[120];
 static int scrollUp; /* 下から何行ぶん戻っているか */

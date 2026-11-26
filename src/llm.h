@@ -10,5 +10,6 @@ int llm_has_avx2(void);
 /* 会話: 発言を渡して、返事を少しずつ受け取る */
 int llm_begin(const char *utf8, int len);  /* 失敗 (長すぎる) なら 0 */
 int llm_step(char *out, int cap);          /* 返事の続き (UTF-8) の長さ。終わりなら -1 */
+void llm_set_system(const char *utf8);    /* 会話の最初に入れる指示 (既定は「日本語で答えて」) */
 void llm_reset(void);                       /* 会話を忘れる */
 int llm_pos(void);                          /* 使った長さ */

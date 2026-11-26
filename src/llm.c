@@ -365,17 +365,25 @@ static int sample(void) { /* 温度 0.7、上位 20 個、合計 0.8 まで (Qwe
 static int pending = -1, finished = 1, generated;
 void llm_reset(void) { pos = 0; pending = -1; finished = 1; }
 static int feed(int tok) { if (pos >= LLM_CTX) return 0; forward(tok, pos++); return 1; }
+/* 会話の最初に入れる指示 (システムプロンプト) */
+static const char *sysPrompt = "あなたは親切なアシスタントです。必ず自然な日本語で、短く分かりやすく答えてください。";
+void llm_set_system(const char *s) { sysPrompt = s; }
 int llm_begin(const char *s, int n) {
     static int ids[LLM_CTX];
     int m = 0;
     if (pos > 0) { ids[m++] = tImEnd; ids[m++] = byteTok['\n']; } /* 前の返事を閉じる */
+    else if (sysPrompt && sysPrompt[0]) {
+        int sl = 0; while (sysPrompt[sl]) sl++;
+        ids[m++] = tImStart; m += encode("system\n", 7, ids + m, LLM_CTX - m);
+        m += encode(sysPrompt, sl, ids + m, LLM_CTX - m); ids[m++] = tImEnd; ids[m++] = byteTok['\n'];
+    }
     ids[m++] = tImStart;
     m += encode("user\n", 5, ids + m, LLM_CTX - m);
     m += encode(s, n, ids + m, LLM_CTX - m - 16);
     ids[m++] = tImEnd; ids[m++] = byteTok['\n']; ids[m++] = tImStart;
     m += encode("assistant\n", 10, ids + m, LLM_CTX - m);
     if (tThink >= 0) { ids[m++] = tThink; m += encode("\n\n", 2, ids + m, 4); ids[m++] = tThinkEnd; m += encode("\n\n", 2, ids + m, 4); } /* 考えずに答える */
-    if (pos + m + 32 >= LLM_CTX) { pos = 0; if (ids[0] == tImEnd) { for (int i = 2; i < m; i++) ids[i - 2] = ids[i]; m -= 2; } }
+    if (pos + m + 32 >= LLM_CTX) { pos = 0; return llm_begin(s, n); } /* いっぱい: 忘れてやり直す */
     if (m + 32 >= LLM_CTX) return 0;
     for (int i = 0; i < m; i++) feed(ids[i]);
     rng ^= (u64)pos * 0x2545F4914F6CDD1Dull;
