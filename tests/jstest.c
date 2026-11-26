@@ -27,6 +27,7 @@ int main(int argc, char **argv) {
     void *mem = malloc(64 << 20);
     js_reset(mem, 64 << 20);
     JsVal con = js_object(); js_set(con, "log", js_native(log_)); js_global("console", con);
-    if (!js_run(src, m)) { printf("ERROR: "); const c16 *e = js_error(); int k = 0; while (e[k]) k++; put16(e, k); putchar('\n'); return 1; }
+    extern u64 js_heap_used(void);
+    int ok = js_run(src, m); printf("[heap %llu KB]\n", js_heap_used() / 1024); if (!ok) { printf("ERROR: "); const c16 *e = js_error(); int k = 0; while (e[k]) k++; put16(e, k); putchar('\n'); return 1; }
     return 0;
 }

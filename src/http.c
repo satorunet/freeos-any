@@ -135,7 +135,11 @@ static int once(const char *url, u8 *buf, u64 cap, HttpResult *r, char *location
         do num[--i] = '0' + v % 10; while (v /= 10);
         cadd(req, ":", sizeof req); cadd(req, num + i, sizeof req);
     }
-    cadd(req, "\r\nUser-Agent: Mozilla/5.0 (compatible; FreeOSAny/2.1)\r\nAccept: text/html,text/plain,*/*\r\n"
+    { /* このサイトのクッキーを送る */
+        static char ck[2048];
+        if (cookie_header(host, *path ? path : "/", https, ck, sizeof ck, 0)) { cadd(req, "\r\nCookie: ", sizeof req); cadd(req, ck, sizeof req); }
+    }
+    cadd(req, "\r\nUser-Agent: Mozilla/5.0 (compatible; FreeOSAny/2.2)\r\nAccept: text/html,text/plain,*/*\r\n"
               "Accept-Encoding: identity\r\nConnection: close\r\n\r\n", sizeof req);
 
     u64 n = 0; int ok = 1, clean = 1;
@@ -178,6 +182,16 @@ static int once(const char *url, u8 *buf, u64 cap, HttpResult *r, char *location
     char v[64];
     r->type[0] = 0; header(h, end, "content-type", r->type, sizeof r->type);
     location[0] = 0; header(h, end, "location", location, URLLEN);
+    for (const char *l = h; l < end;) { /* Set-Cookie は何行もありうる */
+        const char *e = l; while (e < end && *e != '\n') e++;
+        if (e - l > 11 && prefix(l, "set-cookie:")) {
+            static char line[1024]; int k = 0; const char *q = l + 11; while (q < e && *q == ' ') q++;
+            while (q < e && *q != '\r' && k < 1023) line[k++] = *q++;
+            line[k] = 0;
+            cookie_from_response(host, *path ? path : "/", line);
+        }
+        l = e + 1;
+    }
     int chunked = header(h, end, "transfer-encoding", v, sizeof v) && prefix(v, "chunked");
     i64 want = -1;
     if (header(h, end, "content-length", v, sizeof v)) { want = 0; for (char *p = v; *p >= '0' && *p <= '9' && want < (1LL << 40); p++) want = want * 10 + *p - '0'; }

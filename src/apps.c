@@ -392,6 +392,7 @@ static int line_end(int p) { while (p < elen && ebuf[p] != u'\n') p++; return p;
 static void edit_key(Key k) {
     if (!epath[0]) return;
     if (k.scan == K_F3) { flush_romaji(); kana ^= 1; return; }
+    if (k.scan == 0x100 || k.scan == 0x101) { flush_romaji(); kana = k.scan == 0x100; return; } /* 「かな」「英数」キー */
     if (k.ch >= 32) { if (kana && k.ch < 127 && k.ch != u' ') kana_input(k.ch); else { flush_romaji(); insert(k.ch); } return; }
     if (k.ch == 8) { if (nroma) nroma--; else if (ecur) erase(--ecur); return; }
     flush_romaji();

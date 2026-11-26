@@ -106,6 +106,7 @@ void chat_tick(void) {
 }
 void chat_key(Key k) {
     if (k.scan == 0x0D) { kana_flush(in_add); kanaMode ^= 1; return; }   /* F3 */
+    if (k.scan == 0x100 || k.scan == 0x101) { kana_flush(in_add); kanaMode = k.scan == 0x100; return; } /* 「かな」「英数」キー */
     if (k.scan == 8) { llm_reset(); nmsg = 0; loglen = 0; if (state >= 2 && state != 9) { state = 2; msg_new(0); msg_addz(u"会話を忘れました。"); } return; } /* Delete */
     if (k.scan == 1) { scrollUp += 3; return; }
     if (k.scan == 2) { scrollUp = scrollUp > 3 ? scrollUp - 3 : 0; return; }
@@ -173,7 +174,7 @@ void chat_draw(int x, int y, int w, int h) {
     for (int i = 0; i < ilen; i++) px += glyph(px, iy + 14, input[i], 0x1D1D27);
     c16 r[8]; if (kana_pending(r)) { int rw = 0; for (int i = 0; r[i]; i++) rw += charw(r[i]); fill(px, iy + 13, rw, 18, 0xFFE9A8); text(px, iy + 14, r, 0x6B4E00); px += rw; }
     if (state == 2) fill(px + 1, iy + 13, 2, 18, 0x6D5DFC);
-    if (!ilen && state == 2 && !r[0]) text(x + 22, iy + 14, kanaMode ? u"メッセージ (かな入力)" : u"メッセージ (F3 でかな入力)", 0xA0A0B8);
+    if (!ilen && state == 2 && !r[0]) text(x + 22, iy + 14, kanaMode ? u"メッセージ (かな入力)" : u"メッセージ (かなキー / F3 でかな入力)", 0xA0A0B8);
     noclip();
     fill(x + w - 82, iy + 8, 72, 28, state == 2 ? 0x6D5DFC : 0xB8B8CC);
     text(x + w - 62, iy + 14, u"送信", 0xFFFFFF);

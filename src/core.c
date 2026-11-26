@@ -4,6 +4,7 @@
 #include "font.h"
 #include "fontaa.h"
 #include "icons.h"
+#include "vkbd.h"
 
 SystemTable *ST;
 BootServices *BS;
@@ -780,6 +781,7 @@ Status efi_main(Handle image, SystemTable *st) {
     fs_init(image);
     pointer_init();
     tablet_init();
+    vkbd_init();
     sound_init();
     net_init(image);
     wm_open(APP_TERM);
@@ -794,7 +796,11 @@ Status efi_main(Handle image, SystemTable *st) {
     for (;;) {
         u64 which;
         BS->WaitForEvent(1, &timer, &which);
-        Key k;
+        Key k; int special;
+        for (int i = 0; i < 16 && vkbd_read(&k, &special); i++) { /* 仮想マシンのキーボード (「かな」「英数」も) */
+            if (special) { k.scan = special == 1 ? K_KANA : K_EISU; k.ch = 0; }
+            key(k);
+        }
         for (int i = 0; i < 16 && !ST->conIn->ReadKeyStroke(ST->conIn, &k); i++) key(k);
         pointer_poll();
         tablet_poll();

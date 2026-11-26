@@ -101,8 +101,8 @@ typedef struct DNode {
 } DNode;
 
 static u8 *dheap; static u64 dused;
-#define DHEAP (8 * 1024 * 1024)
-#define JSHEAP (24 * 1024 * 1024)
+#define DHEAP (24 * 1024 * 1024)
+#define JSHEAP (64 * 1024 * 1024)
 static void *jsheap;
 static void *dalloc(u64 n) {
     n = (n + 7) & ~7ull;
@@ -112,15 +112,17 @@ static void *dalloc(u64 n) {
 static DNode *root, *body, *docNode, *cursorParent; /* cursorParent: 読み込み中に足していく場所 */
 static c16 pageTitle[80];
 
+static int domFull; /* 要素の領域を使い切った: これ以上は足さない */
 static DNode *dnew(u8 type, const char *tag) {
     DNode *n = dalloc(sizeof(DNode));
-    if (!n) { static DNode dummy; memset(&dummy, 0, sizeof dummy); return &dummy; }
+    if (!n) { domFull = 1; return 0; }
     n->type = type;
     if (tag) ccopy(n->tag, tag, 12);
     return n;
 }
 static void dappend(DNode *p, DNode *c) {
     if (!p || !c || p == c) return;
+    for (DNode *a = p; a; a = a->parent) if (a == c) return; /* 自分の子孫の下には入れない (輪になる) */
     c->parent = p; c->next = 0; c->prev = p->last;
     if (p->last) p->last->next = c; else p->first = c;
     p->last = c;
@@ -139,16 +141,19 @@ static void dinsert_before(DNode *p, DNode *c, DNode *ref) {
     ref->prev = c;
 }
 static void text_set(DNode *n, const c16 *s, int len) {
+    if (!n) return;
     if (len + 1 > n->tcap) { int cap = len + 32; c16 *t = dalloc((u64)cap * 2); if (!t) return; n->text = t; n->tcap = cap; }
     for (int i = 0; i < len; i++) n->text[i] = s[i];
     n->tlen = len; n->text[len] = 0;
 }
 static void text_add(DNode *n, c16 c) {
+    if (!n) return;
     if (n->tlen + 2 > n->tcap) { int cap = n->tcap ? n->tcap * 2 : 32; c16 *t = dalloc((u64)cap * 2); if (!t) return; if (n->tlen) mcopy(t, n->text, (u64)n->tlen * 2); n->text = t; n->tcap = cap; }
     n->text[n->tlen++] = c; n->text[n->tlen] = 0;
 }
 static Attr *attr_find(DNode *n, const char *name) { for (Attr *a = n->attrs; a; a = a->next) if (!cmpi(a->name, name)) return a; return 0; }
 static void attr_set(DNode *n, const char *name, const c16 *v, int len) {
+    if (!n) return;
     Attr *a = attr_find(n, name);
     if (!a) { a = dalloc(sizeof(Attr)); if (!a) return; ccopy(a->name, name, 16); for (char *p = a->name; *p; p++) *p = lower(*p); a->next = n->attrs; n->attrs = a; }
     a->v = dalloc((u64)(len + 1) * 2); if (!a->v) return;
@@ -227,6 +232,7 @@ static void parse_html(const u8 *s, u64 n, DNode *into) {
             if (tag_is(tag, " option ") && is_tag(cursorParent, "option")) cursorParent = cursorParent->parent;
             if (tag_is(tag, " dt dd ")) for (DNode *p = cursorParent; p && !is_tag(p, "dl"); p = p->parent) if (is_tag(p, "dt") || is_tag(p, "dd")) { cursorParent = p->parent; break; }
             DNode *e = dnew(D_ELEM, tag);
+            if (!e) break; /* 要素の領域がいっぱい: ここまでで表示する */
             /* 属性 */
             const u8 *t = s + st; int k = m;
             while (k < tn) {
@@ -256,6 +262,7 @@ static void parse_html(const u8 *s, u64 n, DNode *into) {
                 for (; i + m + 1 < n; i++) if (s[i] == '<' && s[i + 1] == '/' && prefix((const char *)s + i + 2, tag)) break;
                 u64 ce = i < n ? i : n;
                 DNode *tx = dnew(D_TEXT, 0);
+                if (!tx) break;
                 for (u64 p = cs; p < ce;) {
                     u32 c = !cmpi(tag, "script") || !cmpi(tag, "style") ? next_char(s, ce, &p) : s[p] == '&' ? (p++, entity(s, ce, &p)) : next_char(s, ce, &p);
                     if (c != '\r') text_add(tx, (c16)c);
@@ -273,7 +280,7 @@ static void parse_html(const u8 *s, u64 n, DNode *into) {
         }
         /* 文字 */
         DNode *tx = cursorParent->last && cursorParent->last->type == D_TEXT ? cursorParent->last : 0;
-        if (!tx) { tx = dnew(D_TEXT, 0); dappend(cursorParent, tx); }
+        if (!tx) { tx = dnew(D_TEXT, 0); if (!tx) break; dappend(cursorParent, tx); }
         while (i < n && s[i] != '<') {
             u32 c;
             if (s[i] == '&') { i++; c = entity(s, n, &i); } else c = next_char(s, n, &i);
@@ -284,7 +291,7 @@ static void parse_html(const u8 *s, u64 n, DNode *into) {
     parseDepth--;
 }
 static DNode *new_document(void) {
-    dused = 0;
+    dused = 0; domFull = 0;
     docNode = dnew(D_DOC, "#document");
     root = docNode; body = 0; pageTitle[0] = 0;
     return docNode;
@@ -351,7 +358,7 @@ static JsVal Hs(const c16 *s, int n) { return js_str(s, n); }
 static JsStr *argstr(JsVal *a, int n, int i) { return js_tostr(i < n ? a[i] : js_undef()); }
 static void set_children_text(DNode *e, const c16 *s, int len) {
     while (e->first) dremove(e->first);
-    DNode *t = dnew(D_TEXT, 0); text_set(t, s, len); dappend(e, t);
+    DNode *t = dnew(D_TEXT, 0); if (t) { text_set(t, s, len); dappend(e, t); }
     domDirty = 1;
 }
 static void js_str_utf8(JsStr *s, u8 *out, u64 cap, u64 *len) {
@@ -407,9 +414,10 @@ static JsVal d_create(JsVal self, JsVal *a, int n) {
     (void)self; JsStr *s = argstr(a, n, 0); char t[12]; int k = 0;
     for (int i = 0; i < s->len && k < 11; i++) t[k++] = lower((char)s->s[i]);
     t[k] = 0;
-    return js_host(dnew(D_ELEM, t));
+    DNode *e = dnew(D_ELEM, t);
+    return e ? js_host(e) : nul();
 }
-static JsVal d_createText(JsVal self, JsVal *a, int n) { (void)self; JsStr *s = argstr(a, n, 0); DNode *t = dnew(D_TEXT, 0); text_set(t, s->s, s->len); return js_host(t); }
+static JsVal d_createText(JsVal self, JsVal *a, int n) { (void)self; JsStr *s = argstr(a, n, 0); DNode *t = dnew(D_TEXT, 0); if (!t) return nul(); text_set(t, s->s, s->len); return js_host(t); }
 static JsVal d_write(JsVal self, JsVal *a, int n) {
     (void)self;
     for (int i = 0; i < n; i++) {
@@ -455,6 +463,7 @@ static JsVal e_insertAdjacent(JsVal self, JsVal *a, int n) {
     DNode *e = N(self); if (!e || n < 2) return js_undef();
     JsStr *pos = js_tostr(a[0]);
     DNode *tmp = dnew(D_ELEM, "div");
+    if (!tmp) return js_undef();
     if (N(a[1])) { DNode *c = N(a[1]); dremove(c); dappend(tmp, c); }
     else { static u8 buf[128 * 1024]; u64 len; js_str_utf8(js_tostr(a[1]), buf, sizeof buf, &len); DNode *save = cursorParent; parse_html(buf, len, tmp); cursorParent = save; }
     while (tmp->first) {
@@ -467,7 +476,7 @@ static JsVal e_insertAdjacent(JsVal self, JsVal *a, int n) {
     domDirty = 1;
     return js_undef();
 }
-static JsVal e_prepend(JsVal self, JsVal *a, int n) { DNode *p = N(self); for (int i = n - 1; p && i >= 0; i--) { DNode *c = N(a[i]); if (!c) { JsStr *t = js_tostr(a[i]); c = dnew(D_TEXT, 0); text_set(c, t->s, t->len); } else dremove(c); dinsert_before(p, c, p->first); } domDirty = 1; return js_undef(); }
+static JsVal e_prepend(JsVal self, JsVal *a, int n) { DNode *p = N(self); for (int i = n - 1; p && i >= 0; i--) { DNode *c = N(a[i]); if (!c) { JsStr *t = js_tostr(a[i]); c = dnew(D_TEXT, 0); if (!c) break; text_set(c, t->s, t->len); } else dremove(c); dinsert_before(p, c, p->first); } domDirty = 1; return js_undef(); }
 static JsVal e_click(JsVal self, JsVal *a, int n) { (void)a; (void)n; DNode *e = N(self); if (e) fire(e, "click", js_undef()); return js_undef(); }
 static JsVal e_noop(JsVal self, JsVal *a, int n) { (void)self; (void)a; (void)n; return js_undef(); }
 /* classList */
@@ -528,6 +537,10 @@ JsVal host_get(void *p, const JsStr *k, int *found) {
         if (K("head")) return nodeval(find_tag(docNode, "head"));
         if (K("title")) { int l = 0; while (pageTitle[l]) l++; return Hs(pageTitle, l); }
         if (K("readyState")) return js_cstr("complete");
+        if (K("cookie")) { static char ck[4096]; cookie_doc_get(current, ck, sizeof ck); return js_cstr(ck); }
+        if (K("referrer") || K("domain")) return js_cstr("");
+        if (K("hidden")) return js_bool(0);
+        if (K("visibilityState")) return js_cstr("visible");
         if (K("URL")) return js_cstr(current);
         *found = 0; return js_undef();
     }
@@ -548,8 +561,8 @@ JsVal host_get(void *p, const JsStr *k, int *found) {
         if (a && K("href")) { char h[URLLEN], u[URLLEN]; attr_c(e, "href", h, URLLEN); url_join(current, h, u); return js_cstr(u); }
         return a ? Hs(a->v, a->n) : js_cstr("");
     }
-    if (K("style")) { DNode *s = dnew(D_STYLE, 0); s->parent = e; return js_host(s); }
-    if (K("classList")) { DNode *s = dnew(D_CLASS, 0); s->parent = e; return js_host(s); }
+    if (K("style")) { DNode *s = dnew(D_STYLE, 0); if (!s) return nul(); s->parent = e; return js_host(s); }
+    if (K("classList")) { DNode *s = dnew(D_CLASS, 0); if (!s) return nul(); s->parent = e; return js_host(s); }
     if (K("parentNode") || K("parentElement")) return nodeval(e->parent && e->parent->type == D_ELEM ? e->parent : 0);
     if (K("children")) return children_of(e, 1);
     if (K("childNodes")) return children_of(e, 0);
@@ -591,6 +604,7 @@ int host_set(void *p, const JsStr *k, JsVal v) {
         return 1; /* ほかのスタイルは無視 */
     }
     if (e->type == D_DOC) {
+        if (K("cookie")) { static u8 b[2048]; u64 l; js_str_utf8(js_tostr(v), b, sizeof b - 1, &l); b[l] = 0; cookie_doc_set(current, (const char *)b); return 1; }
         if (K("title")) { JsStr *s = js_tostr(v); int l = s->len < 79 ? s->len : 79; for (int i = 0; i < l; i++) pageTitle[i] = s->s[i]; pageTitle[l] = 0; return 1; }
         return 0;
     }
@@ -733,6 +747,13 @@ static JsVal w_setTimeout(JsVal self, JsVal *a, int n) { (void)self; return add_
 static JsVal w_setInterval(JsVal self, JsVal *a, int n) { (void)self; return add_timer(a, n, 1); }
 static JsVal w_clear(JsVal self, JsVal *a, int n) { (void)self; int id = (int)js_tonum(n ? a[0] : js_undef()); for (int i = 0; i < NTIMER; i++) if (timers[i].used && timers[i].id == id) timers[i].used = 0; return js_undef(); }
 static JsVal w_raf(JsVal self, JsVal *a, int n) { (void)self; JsVal b[2] = {n ? a[0] : js_undef(), js_num(16)}; return add_timer(b, 2, 0); }
+static JsVal w_storage_get(JsVal self, JsVal *a, int n) { (void)self; (void)a; (void)n; return nul(); }
+static JsVal w_matchMedia(JsVal self, JsVal *a, int n) {
+    (void)self; (void)a; (void)n;
+    JsVal m = js_object(); js_set(m, "matches", js_bool(0)); js_set(m, "addEventListener", js_native(e_noop)); js_set(m, "addListener", js_native(e_noop));
+    return m;
+}
+static int lastW, lastH;
 static void js_setup_page(void) {
     js_reset(jsheap, JSHEAP);
     memset(timers, 0, sizeof timers);
@@ -746,6 +767,15 @@ static void js_setup_page(void) {
     js_global("clearTimeout", js_native(w_clear)); js_global("clearInterval", js_native(w_clear));
     js_global("requestAnimationFrame", js_native(w_raf));
     js_global("addEventListener", js_native(e_listen));
+    js_global("removeEventListener", js_native(e_noop));
+    js_global("innerWidth", js_num(lastW ? lastW : 760)); js_global("innerHeight", js_num(lastH ? lastH : 560));
+    js_global("devicePixelRatio", js_num(1));
+    { /* localStorage / sessionStorage: 覚えない (ページごとに空) */
+        JsVal st = js_object();
+        js_set(st, "getItem", js_native(w_storage_get)); js_set(st, "setItem", js_native(e_noop)); js_set(st, "removeItem", js_native(e_noop)); js_set(st, "clear", js_native(e_noop));
+        js_global("localStorage", st); js_global("sessionStorage", st);
+    }
+    js_global("matchMedia", js_native(w_matchMedia));
     JsVal loc = js_object(); js_set(loc, "href", js_cstr(current)); js_global("location", loc);
     JsVal nav = js_object(); js_set(nav, "userAgent", js_cstr("Mozilla/5.0 (compatible; FreeOSAny)")); js_set(nav, "language", js_cstr("ja"));
     { JsVal langs[2] = {js_cstr("ja"), js_cstr("en")}; js_set(nav, "languages", js_make_array(langs, 2)); }
@@ -980,6 +1010,7 @@ static void show_text(const u8 *s, u64 n) { /* HTML でない文字のページ 
     new_document(); js_setup_page();
     DNode *p = dnew(D_ELEM, "pre"); dappend(docNode, p);
     DNode *t = dnew(D_TEXT, 0); dappend(p, t);
+    if (!t) { render_dom(); return; }
     for (u64 i = 0; i < n;) { u32 c = next_char(s, n, &i); if (c != '\r') text_add(t, (c16)c); }
     render_dom(); top = 0; sel = -1;
 }
@@ -1201,11 +1232,11 @@ void browser_open(void) { if (init() && !current[0]) show_home(); }
 void browser_tick(void) {
     if (!lines || !docNode) return;
     u64 now = net_ms(); int ran = 0;
-    for (int i = 0; i < NTIMER; i++) if (timers[i].used && now >= timers[i].due) {
+    for (int i = 0; i < NTIMER && ran < 4; i++) if (timers[i].used && now >= timers[i].due) { /* 1 回に 4 つまで */
         JsVal f = timers[i].fn;
-        if (timers[i].every) timers[i].due = now + timers[i].every; else timers[i].used = 0;
-        if (!js_call(f, js_undef(), 0, 0)) js_report();
-        ran = 1;
+        if (timers[i].every) timers[i].due = now + (timers[i].every < 50 ? 50 : timers[i].every); else timers[i].used = 0;
+        if (!js_call(f, js_undef(), 0, 0)) { js_report(); timers[i].used = 0; } /* エラーになったタイマーは止める */
+        ran++;
     }
     if (ran || domDirty) { if (domDirty) render_dom(); invalidate(); }
 }
@@ -1294,7 +1325,6 @@ static void draw_widget(int x, int y, DNode *e, int on) {
     noclip();
 }
 static int content_h(void) { int h = 0; for (int l = 0; l < nline; l++) h += lineHeight(l); return h; }
-static int lastW, lastH;
 void browser_draw(int x, int y, int w, int h) {
     lastW = w; lastH = h;
     fill(x, y, w, h, 0xFFFFFF);
@@ -1304,8 +1334,21 @@ void browser_draw(int x, int y, int w, int h) {
     text(x + 10, y + 7, u"←", 0x33334A);
     fill(x + 30, y + 4, w - 36, 22, focus ? 0xFFFFFF : 0xF4F4FA);
     if (focus) fill(x + 30, y + 25, w - 36, 2, 0x6D5DFC);
-    int n = clen(addr), fit = (w - 56) / 8, from = n > fit ? n - fit : 0, px = x + 36;
-    for (int i = from; i < n; i++) px += glyph(px, y + 7, (u8)addr[i], 0x1D1D27);
+    /* URL は UTF-8 (と %xx) をほどいて表示する。長ければ後ろを見せる */
+    static c16 shown[URLLEN]; int sn = 0; u64 L = (u64)clen(addr);
+    for (u64 i = 0; i < L && sn < URLLEN - 1;) {
+        if (addr[i] == '%' && i + 2 < L) { /* %E3%81%82 → あ */
+            u8 b[4]; int nb = 0; u64 j = i;
+            while (j + 2 < L && addr[j] == '%' && nb < 4) { int hi = addr[j + 1], lo = addr[j + 2]; hi = hi <= '9' ? hi - '0' : (hi | 32) - 'a' + 10; lo = lo <= '9' ? lo - '0' : (lo | 32) - 'a' + 10; if (hi < 0 || hi > 15 || lo < 0 || lo > 15) break; b[nb++] = (u8)(hi << 4 | lo); j += 3; if ((b[0] & 0xC0) != 0xC0) break; int need = b[0] >= 0xF0 ? 4 : b[0] >= 0xE0 ? 3 : 2; if (nb == need) break; }
+            if (nb && (b[0] < 0x80 || (nb >= 2 && nb == (b[0] >= 0xF0 ? 4 : b[0] >= 0xE0 ? 3 : 2)))) { u64 k = 0; shown[sn++] = (c16)next_char(b, (u64)nb, &k); i = j; continue; }
+        }
+        shown[sn++] = (c16)next_char((const u8 *)addr, L, &i);
+    }
+    shown[sn] = 0;
+    int px = x + 36, avail = w - 56, from = 0, tw = 0;
+    for (int i = 0; i < sn; i++) tw += charw(shown[i]);
+    while (tw > avail && from < sn) tw -= charw(shown[from++]);
+    for (int i = from; i < sn; i++) px += glyph(px, y + 7, shown[i], 0x1D1D27);
     if (focus) fill(px + 1, y + 7, 2, 16, 0x6D5DFC);
     int width = w - 24 - SCROLLW;
     layout(width);

@@ -109,7 +109,7 @@ run() { # 引数: CPU の指定
         -drive "if=none,id=disk,format=raw,file=freeos-any.img" \
         -device virtio-blk-pci,drive=disk \
         -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:$PORT-:80" \
-        -device virtio-rng-pci -device virtio-tablet-pci \
+        -device virtio-rng-pci -device virtio-tablet-pci -device virtio-keyboard-pci \
         -audiodev coreaudio,id=snd0 -device virtio-sound-pci,audiodev=snd0,streams=1 $FREEOS_QEMU_EXTRA >qemu.log 2>&1
 }
 

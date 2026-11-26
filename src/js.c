@@ -7,9 +7,15 @@
 /* ---- メモリ (ページごとにまとめて捨てる) ---- */
 static u8 *heap; static u64 heapSize, heapUsed;
 static int oom;
+static u8 spare[256 * 1024]; static u64 spareUsed; /* 使い切ったあと、止まるまでの間だけ使う */
 static void *alloc(u64 n) {
     n = (n + 7) & ~7ull;
-    if (heapUsed + n > heapSize) { oom = 1; heapUsed = 0; } /* 使い切ったら最初から (壊れるが止まらない) */
+    if (heapUsed + n > heapSize) { /* 使い切った: これ以上は実行しない (壊さない) */
+        oom = 1;
+        if (n > sizeof spare) n = sizeof spare;
+        if (spareUsed + n > sizeof spare) spareUsed = 0;
+        void *p = spare + spareUsed; spareUsed += n; memset(p, 0, n); return p;
+    }
     void *p = heap + heapUsed; heapUsed += n;
     memset(p, 0, n);
     return p;
@@ -264,7 +270,14 @@ static const char *const puncts[] = {">>>=", "===", "!==", "**=", "...", "<<=", 
     "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "**", "<<", ">>", 0};
 static int lexLine;
 static Tok *push_tok(u8 t, int nl) {
-    if (ntok % 256 == 0) { Tok *n = alloc(sizeof(Tok) * (u64)(ntok + 256)); if (ntok) mcopy(n, toks, sizeof(Tok) * (u64)ntok); toks = n; }
+    static int cap;
+    if (!ntok) cap = 0;
+    if (ntok == cap) { /* 2 倍ずつ広げる (使うメモリは全体の 2 倍まで) */
+        int nc = cap ? cap * 2 : 1024; Tok *n = alloc(sizeof(Tok) * (u64)nc);
+        if (oom) { failed = 1; ntok = 0; cap = 0; return &toks[0]; }
+        if (ntok) mcopy(n, toks, sizeof(Tok) * (u64)ntok);
+        toks = n; cap = nc;
+    }
     Tok *k = &toks[ntok++]; k->t = t; k->nl = (u8)nl; k->line = lexLine; return k;
 }
 static int regex_ok(void) { /* ここで / が来たら正規表現か */
@@ -274,8 +287,10 @@ static int regex_ok(void) { /* ここで / が来たら正規表現か */
     if (p->t == T_ID) return idis(p, "return") || idis(p, "typeof") || idis(p, "case") || idis(p, "in") || idis(p, "of");
     return !pis(p, ")") && !pis(p, "]") && !pis(p, "}");
 }
+static c16 *strScratch;
 static int lex(const c16 *s, int n) {
     toks = 0; ntok = 0; lexLine = 1;
+    strScratch = alloc((u64)(n + 1) * 2);
     int i = 0, nl = 0;
     int tdepth[16], ntd = 0; /* テンプレート文字列の ${ の深さ */
     while (i <= n && !failed) {
@@ -302,7 +317,7 @@ static int lex(const c16 *s, int n) {
             else if (tmpl) push_tok(T_P, nl)->p[0] = '(';
             if (c == '}') { Tok *t = push_tok(T_P, 0); t->p[0] = ')'; push_tok(T_P, 0)->p[0] = '+'; }
             c16 q = tmpl ? '`' : c; i++;
-            c16 *b = alloc((u64)(n - i + 1) * 2); int k = 0, open = 0;
+            c16 *b = strScratch; int k = 0, open = 0; /* 作業領域は読み込みごとに 1 つ (使い回す) */
             while (i < n && s[i] != q) {
                 if (tmpl && s[i] == '$' && i + 1 < n && s[i + 1] == '{') { open = 1; i += 2; break; }
                 c16 ch = s[i++];
@@ -376,6 +391,8 @@ static Node *block_body(void) { /* { の次から } まで */
     expect("}");
     return head;
 }
+static int has_decl(Node *s) { for (; s; s = s->next) if (s->t == N_VAR && s->flag != 0) return 1; return 0; } /* let / const / 関数宣言 */
+static int usesArgs; /* 解析中の関数が arguments を使うか */
 static Node *function_rest(JsStr *name, int arrow) { /* ( から */
     Node *f = node(N_FUNC); f->s = name;
     Node **tail = &f->a;
@@ -390,10 +407,13 @@ static Node *function_rest(JsStr *name, int arrow) { /* ( から */
     }
     expect(")");
     if (arrow) expect("=>");
-    if (arrow && !pis(cur(), "{")) { f->flag = 3; f->b = assign(); return f; } /* 式だけの本体 */
+    int saveArgs = usesArgs; usesArgs = 0;
+    if (arrow && !pis(cur(), "{")) { f->flag = 3; f->b = assign(); usesArgs = saveArgs | usesArgs; return f; } /* 式だけの本体 (arguments は外の関数のもの) */
     expect("{");
     f->b = node(N_BLOCK); f->b->a = block_body();
     f->flag = arrow ? 1 : 0;
+    if (usesArgs && !arrow) f->flag |= 4;
+    usesArgs = saveArgs | (arrow ? usesArgs : 0);
     return f;
 }
 static int arrow_ahead(void) { /* ( ... ) => か */
@@ -428,7 +448,7 @@ static Node *primary(void) {
             if (accept("(")) { Node **tail = &n->b; while (!failed && !pis(cur(), ")")) { *tail = assign(); tail = &(*tail)->next; if (!accept(",")) break; } expect(")"); }
             return n;
         }
-        tp++; Node *n = node(N_ID); n->s = t->s; return n;
+        tp++; Node *n = node(N_ID); n->s = t->s; if (js_key_is(t->s, "arguments")) usesArgs = 1; return n;
     }
     if (arrow_ahead()) return function_rest(0, 1);
     if (accept("(")) { Node *e = expr(); expect(")"); return e; }
@@ -630,7 +650,7 @@ static int ctl; static JsVal ctlv;
 static Env *global;
 static JsObj *globalObj, *arrayProto, *objectProto;
 static u64 steps;
-#define STEPMAX 20000000ull
+static u64 stepMax = 10000000; /* 読み込み時のスクリプト: 1000万歩まで。イベントとタイマーは 200万歩 */
 static JsVal throw_msg(const char *m) {
     JsObj *e = newobj(K_ERR);
     Prop *p = alloc(sizeof(Prop)); p->k = cstr("message"); p->v = js_cstr(m); e->props = p;
@@ -1046,7 +1066,7 @@ static JsVal call(JsVal f, JsVal self, JsVal *args, int n) {
         if (v.t == JS_UNDEF && p->b) v = eval(p->b, env);
         define(env, p->s, v);
     }
-    if (!(fn->flag & 1)) { JsObj *ar = newarr(); for (int k = 0; k < n; k++) arr_push(ar, args[k]); define(env, cstr("arguments"), O(ar)); }
+    if (fn->flag & 4) { JsObj *ar = newarr(); for (int k = 0; k < n; k++) arr_push(ar, args[k]); define(env, cstr("arguments"), O(ar)); } /* 使うときだけ */
     depth++;
     JsVal r = js_undef();
     if (fn->flag == 3) r = eval(fn->b, env);
@@ -1079,7 +1099,8 @@ static void assign_to(Node *t, JsVal v, Env *e) {
 }
 static JsVal eval(Node *n, Env *e) {
     if (ctl || !n) return js_undef();
-    if (++steps > STEPMAX) return throw_msg("スクリプトの実行が長すぎます");
+    if (oom) { ctl = C_THROW; ctlv = js_cstr("メモリが足りません"); return js_undef(); }
+    if (++steps > stepMax) return throw_msg("スクリプトの実行が長すぎます");
     switch (n->t) {
     case N_NUM: return js_num(n->n);
     case N_STR: return S(n->s);
@@ -1219,12 +1240,16 @@ static void declare(Node *v, Env *e, Env *fnEnv) {
 static Env *fnenv_of(Env *e) { for (Env *x = e; x; x = x->up) if (x->hasSelf || !x->up) return x; return e; }
 static void exec(Node *s, Env *e) {
     if (ctl || !s) return;
-    if (++steps > STEPMAX) { throw_msg("スクリプトの実行が長すぎます"); return; }
+    if (oom) { ctl = C_THROW; ctlv = js_cstr("メモリが足りません"); return; }
+    if (++steps > stepMax) { throw_msg("スクリプトの実行が長すぎます"); return; }
     switch (s->t) {
     case N_EXPR: eval(s->a, e); return;
     case N_VAR: if (s->flag != 9) declare(s, e, fnenv_of(e)); return;
     case N_EMPTY: return;
-    case N_BLOCK: { Env *b = alloc(sizeof(Env)); b->up = e; hoist(s->a, b); exec_list(s->a, b); return; }
+    case N_BLOCK: {
+        if (!has_decl(s->a)) { exec_list(s->a, e); return; } /* 宣言がなければ新しい置き場はいらない */
+        Env *b = alloc(sizeof(Env)); b->up = e; hoist(s->a, b); exec_list(s->a, b); return;
+    }
     case N_IF: { JsVal c = eval(s->a, e); if (ctl) return; exec(js_truthy(c) ? s->b : s->c, e); return; }
     case N_WHILE: case N_DO:
         for (int first = 1;; first = 0) {
@@ -1263,7 +1288,8 @@ static void exec(Node *s, Env *e) {
             for (Prop *p = o->props; p; p = p->next) arr_push(keys, S(p->k));
         }
         for (int i = 0; i < keys->len; i++) {
-            Env *it = alloc(sizeof(Env)); it->up = e;
+            Env *it = e;
+            if (s->c && s->c->flag != 0) { it = alloc(sizeof(Env)); it->up = e; } /* let / const は回ごとに別 */
             if (s->c) define(s->c->flag == 0 ? fnenv_of(e) : it, s->s, keys->arr[i]);
             else { Node id = {0}; id.t = N_ID; id.s = s->s; assign_to(&id, keys->arr[i], e); }
             exec(s->b, it);
@@ -1444,7 +1470,7 @@ static JsObj *mkns(const char *name) { JsObj *o = newobj(K_OBJ); setprop(globalO
 static void fnprop(JsObj *o, const char *name, JsNative f) { setprop(o, cstr(name), js_native(f)); }
 
 void js_reset(void *mem, u64 size) {
-    heap = mem; heapSize = size; heapUsed = 0; oom = 0;
+    heap = mem; heapSize = size; heapUsed = 0; oom = 0; spareUsed = 0;
     ctl = C_NONE; failed = 0; steps = 0;
     global = alloc(sizeof(Env)); global->hasSelf = 1;
     globalObj = newobj(K_OBJ);
@@ -1474,7 +1500,8 @@ void js_reset(void *mem, u64 size) {
 }
 
 int js_run(const c16 *src, int len) {
-    failed = 0; ctl = C_NONE; errmsg[0] = 0; steps = 0;
+    failed = 0; ctl = C_NONE; errmsg[0] = 0; steps = 0; stepMax = 10000000;
+    if (oom) { const char *m = "メモリが足りないので、このページのスクリプトは止めました"; fail(m); return 0; }
     if (!lex(src, len)) return 0;
     tp = 0; parsing = 1;
     Node *head = 0, **tail = &head;
@@ -1495,7 +1522,8 @@ int js_run(const c16 *src, int len) {
 JsVal js_make_array(JsVal *items, int n) { JsObj *a = newarr(); for (int i = 0; i < n; i++) arr_push(a, items[i]); return O(a); }
 JsVal js_global_get(const char *name) { Prop *p = find(globalObj->props, cstr(name)); if (p) return p->v; p = find(global->vars, cstr(name)); return p ? p->v : js_undef(); }
 int js_call(JsVal fn, JsVal self, JsVal *args, int n) {
-    ctl = C_NONE; steps = 0; errmsg[0] = 0;
+    ctl = C_NONE; steps = 0; errmsg[0] = 0; stepMax = 2000000;
+    if (oom) return 1; /* メモリを使い切ったページでは何もしない */
     call(fn, self, args, n);
     if (ctl == C_THROW) {
         JsStr *m = js_tostr(ctlv); int i = 0;
@@ -1506,3 +1534,4 @@ int js_call(JsVal fn, JsVal self, JsVal *args, int n) {
     return 1;
 }
 const c16 *js_error(void) { return errmsg; }
+u64 js_heap_used(void) { return heapUsed + (oom ? 1ull << 40 : 0); }

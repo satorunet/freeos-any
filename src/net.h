@@ -30,3 +30,8 @@ int entropy(u8 *out, int n);      /* 暗号用の乱数。用意できなけれ�
 typedef struct { int status, truncated; char type[80]; char url[URLLEN]; u64 len; } HttpResult;
 int http_get(const char *url, u8 *buf, u64 cap, HttpResult *r); /* 失敗は 0 (net_error 参照) */
 void net_set_error(const c16 *msg);
+/* クッキー (cookie.c) */
+void cookie_from_response(const char *host, const char *path, const char *line);
+int cookie_header(const char *host, const char *path, int https, char *out, int cap, int forScript);
+int cookie_doc_get(const char *url, char *out, int cap);
+void cookie_doc_set(const char *url, const char *s);

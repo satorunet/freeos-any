@@ -66,7 +66,7 @@ void edit_open(const c16 *path);
 void kana_feed(c16 c, void (*out)(c16)); void kana_flush(void (*out)(c16)); int kana_pending(c16 *out); /* ローマ字かな入力 */
 
 /* ---- 起動アニメーションと起動音 ---- */
-#define FREEOS_VER u"2.1"
+#define FREEOS_VER u"2.2"
 u32 *screen(void);                     /* 描画先 (SW x SH) */
 void screen_show(void);                /* 描画先を画面に出す */
 void desktop_compose(void);            /* デスクトップを描画先に描く (画面には出さない) */
