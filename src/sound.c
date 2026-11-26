@@ -37,7 +37,11 @@ typedef struct {
 #define PERIOD (RATE / 5) /* 0.2秒ごとに装置へ渡す */
 #define NPERIOD (FRAMES / PERIOD)
 
+i16 *hda_init(u32 frames); void hda_start(void); void hda_stop(void); u32 hda_pos(void);
+u64 net_ms(void);
+
 static struct {
+    int hda; u64 hdaEnd; u32 lastPos; /* virtio-sound がなければ HDA を使う */
     PciIo *io;
     Region common, notify, device;
     u32 notifyMul;
@@ -292,11 +296,13 @@ void sound_init(void) {
         if (!BS->HandleProtocol(h[i], &g, (void **)&io)) s.ready = start(io);
     }
     BS->FreePool(h);
+    if (!s.ready && (s.pcm = hda_init(FRAMES + RATE / 2))) s.ready = s.hda = 1; /* 後ろ 0.5 秒は無音 (止めるのが遅れても繰り返さない) */
 }
 
 void sound_chime(void) {
     if (!s.ready || s.playing) return;
     synth();
+    if (s.hda) { hda_start(); s.playing = 1; s.lastPos = 0; s.hdaEnd = net_ms() + SECONDS * 1000 + 400; return; }
     s.playing = 1; s.sent = 0; s.done = 0;
     feed();
     pcm_cmd(0x0104); /* START */
@@ -304,6 +310,13 @@ void sound_chime(void) {
 
 void sound_poll(void) {
     if (!s.playing) return;
+    if (s.hda) {
+        /* 繰り返し再生されるので、鳴らし終えて後ろの無音に入ったら止める。念のため時間でも止める */
+        u32 pos = hda_pos();
+        if (pos >= (u32)(FRAMES + RATE * 2 / 5) * 4 || pos < s.lastPos || net_ms() >= s.hdaEnd) hda_stop(), s.playing = 0;
+        s.lastPos = pos;
+        return;
+    }
     s.done += reclaim(&s.tx);
     if (s.sent < NPERIOD) feed();
     if (s.done >= NPERIOD) {

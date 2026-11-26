@@ -12,7 +12,7 @@ build/font.h: tools/mkfont.py $(FONT)
 	@mkdir -p build
 	python3 tools/mkfont.py $(FONT) $@
 
-APP = core apps net http browser transfer solitaire virtio sound boot
+APP = core apps net http browser transfer solitaire virtio sound hda boot
 VER = 1.3
 # BearSSL はOS標準の機能(乱数・時計・SIMD)に頼らない設定でビルドする
 TLSFLAGS = -ffreestanding -mno-stack-arg-probe -fno-stack-protector -fno-builtin -O2 -w \
