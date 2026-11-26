@@ -48,7 +48,13 @@ def load_safetensors(path):
     return out
 
 
-W = load_safetensors(os.path.join(src, 'model.safetensors'))
+# 1 ファイルか、分割 (model.safetensors.index.json) か
+if os.path.exists(os.path.join(src, 'model.safetensors.index.json')):
+    W = {}
+    for shard in sorted(set(json.load(open(os.path.join(src, 'model.safetensors.index.json')))['weight_map'].values())):
+        W.update(load_safetensors(os.path.join(src, shard)))
+else:
+    W = load_safetensors(os.path.join(src, 'model.safetensors'))
 
 
 def q4_0(m):
