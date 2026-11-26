@@ -938,7 +938,9 @@ static void layout(int w) {
         int cw = cw_at(i, w - ind);
         if (px + ind + cw > w && px > 0) {
             int sp = doc[i] == u' ';
-            if (!sp && doc[i] < 0x2E80 && space > lines[nline - 1] && i - space < 40) { /* 単語ごと次の行へ */
+            int latin = !sp && doc[i] < 0x2E80 && space > lines[nline - 1] && i - space < 40;
+            for (int j = space + 1; latin && j < i; j++) if (doc[j] >= 0x2E80) latin = 0; /* 間に日本語があれば空白まで戻らない */
+            if (latin) { /* 単語ごと次の行へ */
                 lines[nline] = space + 1; lineIndent[nline] = ind; nline++;
                 px = 0; for (int j = space + 1; j < i; j++) px += cw_at(j, w - ind);
                 space = -1;
@@ -1029,7 +1031,11 @@ static int load_bytes(const char *url, u8 *buf, u64 cap, u64 *len) {
         *len = (u64)r; return 1;
     }
     HttpResult r;
-    if (!http_get(url, buf, cap, &r)) return 0;
+    int busy = ui_is_busy(APP_BROWSER);
+    if (!busy) ui_busy(APP_BROWSER);
+    int ok = http_get(url, buf, cap, &r);
+    if (!busy) ui_busy(-1);
+    if (!ok) return 0;
     *len = r.len;
     return r.status == 200;
 }
@@ -1066,7 +1072,10 @@ static void load(const char *url, int remember) {
     redraw();
     HttpResult r;
     pageLen = 0;
-    if (!http_get(want, page, PAGEMAX, &r)) { scopy(status, net_error(), 160); invalidate(); return; }
+    ui_busy(APP_BROWSER); /* 読み込み中もほかの操作ができる */
+    int got = http_get(want, page, PAGEMAX, &r);
+    ui_busy(-1);
+    if (!got) { scopy(status, net_error(), 160); invalidate(); return; }
     ccopy(current, r.url, URLLEN); ccopy(addr, r.url, URLLEN);
     pageLen = r.len;
     char type[80]; int i = 0;
@@ -1399,7 +1408,10 @@ void browser_draw(int x, int y, int w, int h) {
     /* 状態 */
     fill(x, y + h - 22, w, 22, 0xE4E4F2);
     if (s && !focus && (is_tag(s, "a"))) { char hr[URLLEN], u[URLLEN]; attr_c(s, "href", hr, URLLEN); url_join(current, hr, u); int cx = x + 8; for (int i = 0; u[i] && cx < x + w - 16; i++) cx += glyph(cx, y + h - 19, (u8)u[i], 0x2455C8); }
-    else text(x + 8, y + h - 19, status, 0x55556A);
+    else {
+        int ex = text(x + 8, y + h - 19, status, 0x55556A);
+        if (ui_is_busy(APP_BROWSER)) for (int i = 0; i < 3; i++) fill(ex + 8 + i * 9, y + h - 12, 5, 5, (int)(net_ms() / 200 % 3) == i ? 0x6D5DFC : 0xC8C8D8); /* 読み込み中の印 */
+    }
     /* alert */
     if (alertOpen) {
         int bw = w - 80 < 420 ? w - 80 : 420, bx = x + (w - bw) / 2, by = y + h / 3;

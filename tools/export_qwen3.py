@@ -48,8 +48,41 @@ def load_safetensors(path):
     return out
 
 
-# 1 ファイルか、分割 (model.safetensors.index.json) か
-if os.path.exists(os.path.join(src, 'model.safetensors.index.json')):
+class Remote(dict):
+    """Hugging Face 上の safetensors から、重みを 1 つずつ必要な部分だけ取ってくる (ディスクに保存しない)"""
+    def __init__(self, base, files):
+        import urllib.request
+        self.base, self.hdr, self.req = base, {}, urllib.request
+        for fn in files:
+            h = self.get(fn, 0, 7); n = struct.unpack('<Q', h)[0]
+            for k, v in json.loads(self.get(fn, 8, 8 + n - 1)).items():
+                if k != '__metadata__':
+                    self.hdr[k] = (fn, 8 + n, v)
+    def get(self, fn, a, b):
+        for tries in range(5):
+            try:
+                r = self.req.Request(self.base + fn, headers={'Range': f'bytes={a}-{b}', 'User-Agent': 'export_qwen3'})
+                data = self.req.urlopen(r, timeout=120).read()
+                if len(data) == b - a + 1:
+                    return data
+            except Exception as e:
+                print('retry', fn, e, file=sys.stderr)
+        raise SystemExit('取得できません: ' + fn)
+    def __getitem__(self, k):
+        fn, base, v = self.hdr[k]
+        a, b = v['data_offsets']
+        raw = np.frombuffer(self.get(fn, base + a, base + b - 1), dtype=np.uint8)
+        arr = (raw.view(np.uint16).astype(np.uint32) << 16).view(np.float32) if v['dtype'] == 'BF16' else raw.view(np.float32)
+        return arr.reshape(v['shape'])
+
+
+# 1 ファイルか、分割 (model.safetensors.index.json) か。--url なら Hugging Face から直接読む
+URL = next((a.split('=', 1)[1] for a in sys.argv if a.startswith('--url=')), None)
+if URL:
+    idx = os.path.join(src, 'model.safetensors.index.json')
+    files = sorted(set(json.load(open(idx))['weight_map'].values())) if os.path.exists(idx) else ['model.safetensors']
+    W = Remote(URL.rstrip('/') + '/', files)
+elif os.path.exists(os.path.join(src, 'model.safetensors.index.json')):
     W = {}
     for shard in sorted(set(json.load(open(os.path.join(src, 'model.safetensors.index.json')))['weight_map'].values())):
         W.update(load_safetensors(os.path.join(src, shard)))

@@ -409,9 +409,9 @@ void net_poll(void) {
     }
     tcp_timers();
 }
+int ui_pump(void); /* core.c */
 int net_wait(void) {
-    Key k;
-    if (!ST->conIn->ReadKeyStroke(ST->conIn, &k) && k.scan == 0x17) { net_set_error(u"中止しました"); return 0; }
+    if (!ui_pump()) { net_set_error(u"中止しました"); return 0; } /* 待つ間も画面とほかのアプリを動かす */
     net_poll();
     BS->Stall(200);
     return 1;

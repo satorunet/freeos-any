@@ -5,6 +5,7 @@
 
 | 版 | 内容 |
 |---|---|
+| [v2.3](history/v2.3/README.md) | JavaScript の文法をひととおり、読み込み中も動く画面 |
 | [v2.2](history/v2.2/README.md) | 「かな」「英数」キー、ブラウザの安定化、クッキー |
 | [v2.1](history/v2.1/README.md) | AI チャット (Qwen3-0.6B が OS の中で動く) |
 | [v2.0](history/v2.0/README.md) | HTML と JavaScript のビューアー、スクロール、新しいカーソル |

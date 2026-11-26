@@ -3,6 +3,8 @@
  * 数・文字列・真偽・null・undefined・配列・オブジェクト・テンプレート文字列、主な組み込み関数。
  * 非対応: class、正規表現 (文字列として扱う)、ジェネレーター、async、getter/setter など。 */
 #include "js.h"
+#include "regex.h"
+int memcmp(const void *a, const void *b, u64 n);
 
 /* ---- メモリ (ページごとにまとめて捨てる) ---- */
 static u8 *heap; static u64 heapSize, heapUsed;
@@ -22,10 +24,10 @@ static void *alloc(u64 n) {
 }
 
 /* ---- 値 ---- */
-typedef struct Prop { JsStr *k; JsVal v; struct Prop *next; } Prop;
+typedef struct Prop { JsStr *k; JsVal v; struct Prop *next; JsVal get, set; u8 acc; } Prop; /* acc: getter / setter を持つ */
 typedef struct Node Node;
 typedef struct Env { Prop *vars; struct Env *up; JsVal self; int hasSelf; } Env;
-enum { K_OBJ, K_ARR, K_FUNC, K_NATIVE, K_HOST, K_DATE, K_ERR };
+enum { K_OBJ, K_ARR, K_FUNC, K_NATIVE, K_HOST, K_DATE, K_ERR, K_REGEX, K_MAP, K_SET, K_PROMISE };
 struct JsObj {
     u8 kind;
     Prop *props;
@@ -35,6 +37,9 @@ struct JsObj {
     void *host;                 /* 要素 */
     double ms;                  /* 日付 */
     JsObj *proto;
+    JsVal *vals;                /* Map の値 (キーは arr) */
+    JsVal thisArg, pval;        /* bind の this / Promise の値 */
+    Node *fields; Env *fenv; u8 derived; /* class: インスタンスのフィールド、extends あり */
 };
 static JsVal V(u8 t) { JsVal v = {t, 0, 0}; return v; }
 JsVal js_undef(void) { return V(JS_UNDEF); }
@@ -196,6 +201,27 @@ static double strnum(const JsStr *s) {
 }
 static JsVal call(JsVal f, JsVal self, JsVal *args, int n);
 static JsVal getp(JsVal o, JsStr *k);
+static JsVal make_regex(JsStr *pat, JsStr *flags);
+static JsObj *as_regex(JsVal v);
+static JsVal rx_exec(JsObj *o, JsStr *s);
+static int rx_flag(JsObj *o, const char *name);
+static JsVal rx_replace(JsObj *o, JsStr *s, JsVal rep, int forceAll);
+static JsVal r_toString(JsVal self, JsVal *a, int n);
+static JsVal coll_get(JsVal o, JsObj *x, JsStr *k);
+static JsVal f_bind(JsVal, JsVal *, int); static JsVal a_flat(JsVal, JsVal *, int); static JsVal a_flatMap(JsVal, JsVal *, int);
+static JsVal a_at(JsVal, JsVal *, int); static JsVal a_fill(JsVal, JsVal *, int); static JsVal a_lastIndexOf(JsVal, JsVal *, int);
+static JsVal a_keysA(JsVal, JsVal *, int); static JsVal a_entriesA(JsVal, JsVal *, int); static JsVal a_valuesA(JsVal, JsVal *, int);
+static JsVal a_reduceRight(JsVal, JsVal *, int); static JsVal s_at(JsVal, JsVal *, int); static JsVal s_trimStart(JsVal, JsVal *, int);
+static JsVal s_trimEnd(JsVal, JsVal *, int); static JsVal s_localeCompare(JsVal, JsVal *, int); static JsVal s_self(JsVal, JsVal *, int);
+static JsVal promise_get(JsVal o, JsStr *k);
+static JsObj *iter_values(JsVal v);
+static void bind_pattern(Node *pat, JsVal v, Env *e, Env *target, int assignMode);
+static JsObj *promise_new(void);
+static void promise_resolve(JsObj *p, JsVal v);
+static void promise_settle(JsObj *p, JsVal v, int state);
+static JsVal await_value(JsVal v);
+static JsVal make_class(Node *c, Env *e);
+static void run_microtasks(void);
 double js_tonum(JsVal v) {
     switch (v.t) {
     case JS_NUM: return v.n;
@@ -221,6 +247,7 @@ JsStr *js_tostr(JsVal v) {
         if (o->kind == K_FUNC || o->kind == K_NATIVE) return cstr("function () { [code] }");
         if (o->kind == K_HOST) return cstr("[object HTMLElement]");
         if (o->kind == K_DATE) return date_str(o->ms, 0);
+        if (o->kind == K_REGEX) return js_tostr(r_toString(v, 0, 0));
         if (o->kind == K_ERR) { JsVal m = getp(v, cstr("message")); return concat(cstr("Error: "), js_tostr(m)); }
         JsVal ts = getp(v, cstr("toString"));
         if (js_is_func(ts) && obj(ts)->kind == K_FUNC) { JsVal r = call(ts, v, 0, 0); if (r.t == JS_STR) return r.p; }
@@ -239,8 +266,8 @@ int js_truthy(JsVal v) {
 }
 
 /* ---- 字句解析 ---- */
-enum { T_EOF, T_NUM, T_STR, T_ID, T_P };
-typedef struct { u8 t, nl; char p[5]; int line; double n; JsStr *s; } Tok;
+enum { T_EOF, T_NUM, T_STR, T_ID, T_P, T_REGEX };
+typedef struct { u8 t, nl; char p[5]; int line; double n; JsStr *s, *f; } Tok;
 static Tok *toks; static int ntok, tp, parsing;
 static int curLine(void) { return parsing && toks && tp < ntok ? toks[tp].line : 0; }
 static c16 errmsg[200];
@@ -283,7 +310,7 @@ static Tok *push_tok(u8 t, int nl) {
 static int regex_ok(void) { /* ここで / が来たら正規表現か */
     if (!ntok) return 1;
     Tok *p = &toks[ntok - 1];
-    if (p->t == T_NUM || p->t == T_STR) return 0;
+    if (p->t == T_NUM || p->t == T_STR || p->t == T_REGEX) return 0;
     if (p->t == T_ID) return idis(p, "return") || idis(p, "typeof") || idis(p, "case") || idis(p, "in") || idis(p, "of");
     return !pis(p, ")") && !pis(p, "]") && !pis(p, "}");
 }
@@ -338,11 +365,12 @@ static int lex(const c16 *s, int n) {
             else { i++; if (tmpl) push_tok(T_P, 0)->p[0] = ')'; }
             nl = 0; continue;
         }
-        if (c == '/' && regex_ok()) { /* 正規表現は中身の文字列として扱う */
+        if (c == '/' && regex_ok()) { /* 正規表現 /…/flags */
             int st = ++i, cls = 0;
             while (i < n && (s[i] != '/' || cls) && s[i] != '\n') { if (s[i] == '\\') i++; else if (s[i] == '[') cls = 1; else if (s[i] == ']') cls = 0; i++; }
-            Tok *t = push_tok(T_STR, nl); t->s = mkstr(s + st, i - st); i++;
-            while (i < n && isid(s[i])) i++;
+            Tok *t = push_tok(T_REGEX, nl); t->s = mkstr(s + st, i - st); i++;
+            int fs = i; while (i < n && isid(s[i])) i++;
+            t->f = mkstr(s + fs, i - fs);
             nl = 0; continue;
         }
         Tok *t = push_tok(T_P, nl); nl = 0;
@@ -363,10 +391,11 @@ static int lex(const c16 *s, int n) {
 }
 
 /* ---- 構文木 ---- */
+enum { N_REGEX = 100, N_ARRPAT, N_OBJPAT, N_PATPROP, N_CLASS, N_SUPERCALL, N_SUPERMEMBER, N_CLASSDECL };
 enum { N_NUM, N_STR, N_ID, N_THIS, N_ARR, N_OBJ, N_PROP, N_FUNC, N_CALL, N_NEW, N_MEMBER, N_INDEX, N_UNARY, N_BIN, N_LOGIC,
        N_ASSIGN, N_UPDATE, N_COND, N_SEQ, N_SPREAD,
        N_VAR, N_DECL, N_EXPR, N_IF, N_FOR, N_FORIN, N_WHILE, N_DO, N_BLOCK, N_RETURN, N_BREAK, N_CONT, N_THROW, N_TRY, N_SWITCH, N_CASE, N_EMPTY };
-struct Node { u8 t, flag; char op[5]; Node *a, *b, *c, *d, *next; JsStr *s; double n; };
+struct Node { u8 t, flag; char op[5]; Node *a, *b, *c, *d, *next; JsStr *s, *lab; double n; }; /* lab: ループのラベル */
 static Node *node(u8 t) { Node *n = alloc(sizeof(Node)); n->t = t; return n; }
 static Tok *cur(void) { return &toks[tp]; }
 static Tok *peek(int k) { return &toks[tp + k < ntok ? tp + k : ntok - 1]; }
@@ -384,6 +413,8 @@ static void semi(void) {
 }
 static Node *expr(void);
 static Node *assign(void);
+static Node *parse_class(int isExpr);
+static Node *postfix(void);
 static Node *statement(void);
 static Node *block_body(void) { /* { の次から } まで */
     Node *head = 0, **tail = &head;
@@ -393,15 +424,82 @@ static Node *block_body(void) { /* { の次から } まで */
 }
 static int has_decl(Node *s) { for (; s; s = s->next) if (s->t == N_VAR && s->flag != 0) return 1; return 0; } /* let / const / 関数宣言 */
 static int usesArgs; /* 解析中の関数が arguments を使うか */
+/* 分割代入の形: 名前 / [a, b = 1, ...r] / {a, b: c, d = 1, ...r}。既定値は d に */
+static Node *parse_pattern(void) {
+    if (accept("[")) {
+        Node *p = node(N_ARRPAT), **tail = &p->a;
+        while (!failed && !pis(cur(), "]")) {
+            Node *e;
+            if (pis(cur(), ",")) e = node(N_EMPTY);
+            else {
+                int rest = accept("...");
+                e = parse_pattern(); if (rest) e->flag = 1;
+                if (accept("=")) e->d = assign();
+            }
+            *tail = e; tail = &e->next;
+            if (!accept(",")) break;
+        }
+        expect("]");
+        return p;
+    }
+    if (accept("{")) {
+        Node *p = node(N_OBJPAT), **tail = &p->a;
+        while (!failed && !pis(cur(), "}")) {
+            Node *pp = node(N_PATPROP);
+            if (accept("...")) { pp->flag = 1; pp->b = node(N_ID); pp->b->s = ident(); }
+            else {
+                if (accept("[")) { pp->c = assign(); expect("]"); }
+                else if (cur()->t == T_STR || cur()->t == T_ID) pp->s = toks[tp++].s;
+                else if (cur()->t == T_NUM) pp->s = numstr(toks[tp++].n);
+                if (accept(":")) pp->b = parse_pattern();
+                else { pp->b = node(N_ID); pp->b->s = pp->s; }
+                if (accept("=")) pp->b->d = assign();
+            }
+            *tail = pp; tail = &pp->next;
+            if (!accept(",")) break;
+        }
+        expect("}");
+        return p;
+    }
+    Node *n = node(N_ID); n->s = ident(); return n;
+}
+/* 式として読んだものを分割代入の形に直す ([a, b] = … のとき) */
+static Node *to_pattern(Node *x) {
+    if (!x) return x;
+    if (x->t == N_ARR) {
+        Node *p = node(N_ARRPAT), **tail = &p->a;
+        for (Node *e = x->a; e; ) {
+            Node *nx = e->next, *t;
+            if (e->t == N_SPREAD) { t = to_pattern(e->a); t->flag = 1; }
+            else if (e->t == N_ASSIGN && e->op[0] == '=' && !e->op[1]) { t = to_pattern(e->a); t->d = e->b; }
+            else if (e->t == N_ID && js_key_is(e->s, "undefined")) t = node(N_EMPTY);
+            else t = to_pattern(e);
+            t->next = 0; *tail = t; tail = &t->next; e = nx;
+        }
+        return p;
+    }
+    if (x->t == N_OBJ) {
+        Node *p = node(N_OBJPAT), **tail = &p->a;
+        for (Node *e = x->a; e; e = e->next) {
+            Node *pp = node(N_PATPROP); pp->s = e->s; pp->c = e->c;
+            if (e->flag == 2) { pp->flag = 1; pp->b = to_pattern(e->b); }
+            else if (e->b && e->b->t == N_ASSIGN && e->b->op[0] == '=' && !e->b->op[1]) { pp->b = to_pattern(e->b->a); pp->b->d = e->b->b; }
+            else pp->b = to_pattern(e->b);
+            *tail = pp; tail = &pp->next;
+        }
+        return p;
+    }
+    return x; /* 名前 / a.b / a[i] */
+}
 static Node *function_rest(JsStr *name, int arrow) { /* ( から */
     Node *f = node(N_FUNC); f->s = name;
     Node **tail = &f->a;
     expect("(");
     while (!failed && !pis(cur(), ")")) {
-        Node *p = node(N_ID);
-        if (accept("...")) p->flag = 1;
-        p->s = ident();
-        if (accept("=")) p->b = assign();
+        int rest = accept("...");
+        Node *p = parse_pattern();
+        if (rest) p->flag = 1;
+        if (accept("=")) p->d = assign();
         *tail = p; tail = &p->next;
         if (!accept(",")) break;
     }
@@ -409,6 +507,7 @@ static Node *function_rest(JsStr *name, int arrow) { /* ( から */
     if (arrow) expect("=>");
     int saveArgs = usesArgs; usesArgs = 0;
     if (arrow && !pis(cur(), "{")) { f->flag = 3; f->b = assign(); usesArgs = saveArgs | usesArgs; return f; } /* 式だけの本体 (arguments は外の関数のもの) */
+    /* flag: 1 アロー 2 式だけ 4 arguments を使う 8 async */
     expect("{");
     f->b = node(N_BLOCK); f->b->a = block_body();
     f->flag = arrow ? 1 : 0;
@@ -426,10 +525,39 @@ static int arrow_ahead(void) { /* ( ... ) => か */
     }
     return 0;
 }
+/* class 名前 extends 式 { … }: 中身は N_PROP の並び (flag: 0 メソッド 1 フィールド 3 getter 4 setter、op[0]='s' なら static) */
+static Node *parse_class(int isExpr) {
+    Node *c = node(N_CLASS);
+    if (cur()->t == T_ID && !idis(cur(), "extends")) c->s = ident();
+    else if (!isExpr) fail("構文エラー: class の名前");
+    if (accept_kw("extends")) c->a = postfix();
+    expect("{");
+    Node **tail = &c->b;
+    while (!failed && !pis(cur(), "}") && cur()->t != T_EOF) {
+        if (accept(";")) continue;
+        Node *p = node(N_PROP);
+        if (idis(cur(), "static") && !pis(peek(1), "(") && !pis(peek(1), "=")) { tp++; p->op[0] = 's'; }
+        int acc = 0, isAsync = 0;
+        if ((idis(cur(), "get") || idis(cur(), "set")) && !pis(peek(1), "(") && !pis(peek(1), "=") && !pis(peek(1), ";")) { acc = cur()->s->s[0] == 'g' ? 3 : 4; tp++; }
+        if (idis(cur(), "async") && !pis(peek(1), "(") && !pis(peek(1), "=")) { isAsync = 1; tp++; }
+        accept("*");
+        if (accept("#")) {} /* #private は普通の名前として */
+        if (accept("[")) { p->c = assign(); expect("]"); }
+        else if (cur()->t == T_STR || cur()->t == T_ID) p->s = toks[tp++].s;
+        else if (cur()->t == T_NUM) p->s = numstr(toks[tp++].n);
+        else { fail("構文エラー: class"); break; }
+        if (pis(cur(), "(")) { p->b = function_rest(p->s, 0); p->flag = (u8)acc; if (isAsync) p->b->flag |= 8; }
+        else { p->flag = 1; if (accept("=")) p->b = assign(); semi(); } /* フィールド */
+        *tail = p; tail = &p->next;
+    }
+    expect("}");
+    return c;
+}
 static Node *primary(void) {
     Tok *t = cur();
     if (t->t == T_NUM) { tp++; Node *n = node(N_NUM); n->n = t->n; return n; }
     if (t->t == T_STR) { tp++; Node *n = node(N_STR); n->s = t->s; return n; }
+    if (t->t == T_REGEX) { tp++; Node *n = node(N_REGEX); n->s = t->s; n->a = node(N_STR); n->a->s = t->f; return n; }
     if (t->t == T_ID) {
         if (pis(peek(1), "=>")) { /* x => ... */
             Node *f = node(N_FUNC); f->a = node(N_ID); f->a->s = t->s; tp += 2;
@@ -438,7 +566,15 @@ static Node *primary(void) {
             return f;
         }
         if (idis(t, "function")) { tp++; JsStr *name = cur()->t == T_ID ? ident() : 0; return function_rest(name, 0); }
-        if (idis(t, "async") && (idis(peek(1), "function") || pis(peek(1), "("))) { tp++; return primary(); }
+        if (idis(t, "async") && !peek(1)->nl && (idis(peek(1), "function") || pis(peek(1), "(") || (peek(1)->t == T_ID && pis(peek(2), "=>")))) {
+            tp++; Node *f = primary(); if (f->t == N_FUNC) f->flag |= 8; return f; /* async 関数 */
+        }
+        if (idis(t, "class")) { tp++; return parse_class(1); }
+        if (idis(t, "super")) {
+            tp++;
+            if (pis(cur(), "(")) { Node *c = node(N_SUPERCALL); tp++; Node **tail = &c->b; while (!failed && !pis(cur(), ")")) { Node *x; if (accept("...")) { x = node(N_SPREAD); x->a = assign(); } else x = assign(); *tail = x; tail = &x->next; if (!accept(",")) break; } expect(")"); return c; }
+            expect("."); Node *m = node(N_SUPERMEMBER); m->s = ident(); return m;
+        }
         if (idis(t, "this")) { tp++; return node(N_THIS); }
         if (idis(t, "new")) {
             tp++; Node *n = node(N_NEW);
@@ -471,11 +607,15 @@ static Node *primary(void) {
             Node *p = node(N_PROP);
             if (accept("...")) { p->flag = 2; p->b = assign(); }
             else {
+                int acc = 0, isAsync = 0;
+                if ((idis(cur(), "get") || idis(cur(), "set")) && !pis(peek(1), ":") && !pis(peek(1), "(") && !pis(peek(1), ",") && !pis(peek(1), "}")) { acc = cur()->s->s[0] == 'g' ? 3 : 4; tp++; }
+                if (idis(cur(), "async") && !pis(peek(1), ":") && !pis(peek(1), "(") && !pis(peek(1), ",") && !pis(peek(1), "}")) { isAsync = 1; tp++; }
+                if (accept("*")) {} /* ジェネレーターは普通の関数として */
                 if (accept("[")) { p->c = assign(); expect("]"); }
                 else if (cur()->t == T_STR || cur()->t == T_ID) p->s = toks[tp++].s;
                 else if (cur()->t == T_NUM) p->s = numstr(toks[tp++].n);
                 else { fail("構文エラー: オブジェクト"); break; }
-                if (pis(cur(), "(")) p->b = function_rest(p->s, 0);       /* メソッド */
+                if (pis(cur(), "(")) { p->b = function_rest(p->s, 0); p->flag = (u8)acc; if (isAsync) p->b->flag |= 8; } /* メソッド / getter / setter */
                 else if (accept(":")) p->b = assign();
                 else { p->b = node(N_ID); p->b->s = p->s; }           /* 省略形 {a} */
             }
@@ -490,15 +630,19 @@ static Node *primary(void) {
     return node(N_EMPTY);
 }
 static Node *postfix(void) {
-    Node *e = primary();
+    Node *e = primary(); int chain = 0;
     for (;;) {
         if (failed) return e;
-        if (accept(".") || accept("?.")) {
-            if (pis(cur(), "(")) { continue; } /* a?.() */
-            Node *m = node(N_MEMBER); m->a = e; m->s = ident(); e = m;
-        } else if (accept("[")) { Node *m = node(N_INDEX); m->a = e; m->b = expr(); expect("]"); e = m; }
+        int opt = 0;
+        if (accept("?.")) { opt = 1; chain = 2; } /* ?. : 前が null / undefined なら、この先は全部 undefined */
+        if (opt && pis(cur(), "(")) {}
+        else if (opt && pis(cur(), "[")) {}
+        else if (opt || accept(".")) {
+            Node *m = node(N_MEMBER); m->a = e; m->s = ident(); m->flag = (u8)(opt | chain); e = m; continue;
+        }
+        if (accept("[")) { Node *m = node(N_INDEX); m->a = e; m->b = expr(); expect("]"); m->flag = (u8)(opt | chain); e = m; }
         else if (accept("(")) {
-            Node *c = node(N_CALL); c->a = e; Node **tail = &c->b;
+            Node *c = node(N_CALL); c->a = e; c->flag = (u8)(opt | chain); Node **tail = &c->b;
             while (!failed && !pis(cur(), ")")) {
                 Node *x; if (accept("...")) { x = node(N_SPREAD); x->a = assign(); } else x = assign();
                 *tail = x; tail = &x->next; if (!accept(",")) break;
@@ -554,7 +698,8 @@ static Node *assign(void) {
         if (pis(t, "===") || pis(t, "!==")) return c;
         tp++; Node *n = node(N_ASSIGN);
         for (int i = 0; i < 4; i++) n->op[i] = t->p[i];
-        n->a = c; n->b = assign(); return n;
+        n->a = (c->t == N_ARR || c->t == N_OBJ) && pis(t, "=") ? to_pattern(c) : c; /* [a, b] = … */
+        n->b = assign(); return n;
     }
     return c;
 }
@@ -567,12 +712,8 @@ static Node *var_decl(int kind) {
     Node *v = node(N_VAR), **tail = &v->a; v->flag = (u8)kind;
     do {
         Node *d = node(N_DECL);
-        if (pis(cur(), "{") || pis(cur(), "[")) { /* 分割代入は1段だけ: const {a, b} = o / const [x, y] = a */
-            int arr = pis(cur(), "["); tp++;
-            Node **pt = &d->c; d->flag = arr ? 2 : 1;
-            while (!failed && !pis(cur(), arr ? "]" : "}")) { Node *p = node(N_ID); p->s = ident(); if (!arr && accept(":")) p->n = 1, p->b = node(N_ID), p->b->s = ident(); if (accept("=")) p->d = assign(); *pt = p; pt = &p->next; if (!accept(",")) break; }
-            expect(arr ? "]" : "}");
-        } else d->s = ident();
+        if (pis(cur(), "{") || pis(cur(), "[")) { d->c = parse_pattern(); d->flag = 1; } /* 分割代入 */
+        else d->s = ident();
         if (accept("=")) d->a = assign();
         *tail = d; tail = &d->next;
     } while (accept(","));
@@ -585,8 +726,8 @@ static Node *statement(void) {
     if (t->t == T_ID) {
         if (idis(t, "var") || idis(t, "let") || idis(t, "const")) { int k = idis(t, "var") ? 0 : idis(t, "let") ? 1 : 2; tp++; Node *v = var_decl(k); semi(); return v; }
         if (idis(t, "function") || (idis(t, "async") && idis(peek(1), "function"))) {
-            if (idis(t, "async")) tp++;
-            tp++; Node *f = function_rest(ident(), 0); Node *s = node(N_VAR); s->flag = 9; s->a = f; return s; /* 関数宣言 */
+            int isAsync = idis(t, "async"); if (isAsync) tp++;
+            tp++; accept("*"); Node *f = function_rest(ident(), 0); if (isAsync) f->flag |= 8; Node *s = node(N_VAR); s->flag = 9; s->a = f; return s; /* 関数宣言 */
         }
         if (accept_kw("if")) { Node *n = node(N_IF); expect("("); n->a = expr(); expect(")"); n->b = statement(); if (accept_kw("else")) n->c = statement(); return n; }
         if (accept_kw("while")) { Node *n = node(N_WHILE); expect("("); n->a = expr(); expect(")"); n->b = statement(); return n; }
@@ -596,8 +737,10 @@ static Node *statement(void) {
             Node *init = 0; int kind = -1;
             if (idis(cur(), "var") || idis(cur(), "let") || idis(cur(), "const")) {
                 kind = idis(cur(), "var") ? 0 : idis(cur(), "let") ? 1 : 2; tp++;
-                if (cur()->t == T_ID && (idis(peek(1), "of") || idis(peek(1), "in"))) {
-                    Node *n = node(N_FORIN); n->s = ident(); n->flag = idis(cur(), "of"); tp++; n->c = node(N_EMPTY); n->c->flag = (u8)kind;
+                if ((cur()->t == T_ID && (idis(peek(1), "of") || idis(peek(1), "in"))) || pis(cur(), "[") || pis(cur(), "{")) {
+                    Node *n = node(N_FORIN);
+                    if (cur()->t == T_ID) n->s = ident(); else n->d = parse_pattern(); /* for (const [k, v] of …) */
+                    n->flag = idis(cur(), "of"); tp++; n->c = node(N_EMPTY); n->c->flag = (u8)kind;
                     n->a = expr(); expect(")"); n->b = statement(); return n;
                 }
                 noIn = 1; init = var_decl(kind); noIn = 0;
@@ -616,12 +759,13 @@ static Node *statement(void) {
             return n;
         }
         if (accept_kw("return")) { Node *n = node(N_RETURN); if (!pis(cur(), ";") && !pis(cur(), "}") && !cur()->nl && cur()->t != T_EOF) n->a = expr(); semi(); return n; }
-        if (accept_kw("break")) { if (cur()->t == T_ID && !cur()->nl) tp++; semi(); return node(N_BREAK); }
-        if (accept_kw("continue")) { if (cur()->t == T_ID && !cur()->nl) tp++; semi(); return node(N_CONT); }
+        if (accept_kw("break")) { Node *b = node(N_BREAK); if (cur()->t == T_ID && !cur()->nl) b->s = toks[tp++].s; semi(); return b; }
+        if (accept_kw("continue")) { Node *b = node(N_CONT); if (cur()->t == T_ID && !cur()->nl) b->s = toks[tp++].s; semi(); return b; }
+        if (idis(t, "class") && peek(1)->t == T_ID) { tp++; Node *c = parse_class(0); Node *d = node(N_CLASSDECL); d->a = c; return d; }
         if (accept_kw("throw")) { Node *n = node(N_THROW); n->a = expr(); semi(); return n; }
         if (accept_kw("try")) {
             Node *n = node(N_TRY); expect("{"); n->a = node(N_BLOCK); n->a->a = block_body();
-            if (accept_kw("catch")) { if (accept("(")) { n->s = ident(); expect(")"); } expect("{"); n->b = node(N_BLOCK); n->b->a = block_body(); }
+            if (accept_kw("catch")) { if (accept("(")) { if (cur()->t == T_ID) n->s = ident(); else n->d = parse_pattern(); expect(")"); } expect("{"); n->b = node(N_BLOCK); n->b->a = block_body(); }
             if (accept_kw("finally")) { expect("{"); n->c = node(N_BLOCK); n->c->a = block_body(); }
             return n;
         }
@@ -639,14 +783,21 @@ static Node *statement(void) {
             expect("}");
             return n;
         }
-        if (cur()->t == T_ID && pis(peek(1), ":") ) { tp += 2; return statement(); } /* ラベル */
+        if (cur()->t == T_ID && pis(peek(1), ":") ) { JsStr *l = toks[tp].s; tp += 2; Node *st = statement(); if (st) st->lab = l; return st; } /* ラベル */
     }
     Node *n = node(N_EXPR); n->a = expr(); semi(); return n;
 }
 
 /* ---- 実行 ---- */
 enum { C_NONE, C_RETURN, C_BREAK, C_CONT, C_THROW };
-static int ctl; static JsVal ctlv;
+static int ctl; static JsVal ctlv; static JsStr *ctlLabel; /* break / continue のラベル */
+/* ループの中で: 1 なら抜ける、0 なら続ける (continue を含む) */
+static int loop_ctl(Node *loop) {
+    if (ctl != C_BREAK && ctl != C_CONT) return ctl != C_NONE;
+    if (ctlLabel && (!loop->lab || !(ctlLabel->len == loop->lab->len && !memcmp(ctlLabel->s, loop->lab->s, (u64)ctlLabel->len * 2)))) return 1; /* 外のループ宛て */
+    int brk = ctl == C_BREAK; ctl = C_NONE; ctlLabel = 0;
+    return brk ? 2 : 0;
+}
 static Env *global;
 static JsObj *globalObj, *arrayProto, *objectProto;
 static u64 steps;
@@ -733,6 +884,21 @@ static JsVal s_trim(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsStr *s = 
 static JsVal s_split(JsVal self, JsVal *a, int n) {
     JsStr *s = thisstr(self); JsObj *r = newarr();
     if (!n || a[0].t == JS_UNDEF) { arr_push(r, S(s)); return O(r); }
+    JsObj *re = as_regex(a[0]);
+    if (re) { /* 正規表現で区切る (グループも入れる) */
+        int pos = 0, nc = re_ncap(re->host); int *caps = alloc(sizeof(int) * (u64)(nc + 1) * 2);
+        if (!s->len) { if (!re_exec(re->host, s->s, 0, 0, 1, caps)) arr_push(r, S(s)); return O(r); }
+        int q = 0;
+        while (q < s->len) {
+            if (!re_exec(re->host, s->s, s->len, q, 1, caps) || caps[1] == pos || caps[1] > s->len) { q++; continue; }
+            if (caps[1] == caps[0] && caps[0] == pos) { q++; continue; }
+            arr_push(r, S(mkstr(s->s + pos, q - pos)));
+            for (int i = 1; i <= nc; i++) arr_push(r, caps[i * 2] < 0 ? js_undef() : S(mkstr(s->s + caps[i * 2], caps[i * 2 + 1] - caps[i * 2])));
+            pos = caps[1]; q = pos > q ? pos : q + 1;
+        }
+        arr_push(r, S(mkstr(s->s + pos, s->len - pos)));
+        return O(r);
+    }
     JsStr *sep = js_tostr(a[0]);
     if (!sep->len) { for (int i = 0; i < s->len; i++) arr_push(r, S(mkstr(s->s + i, 1))); return O(r); }
     int st = 0, i;
@@ -753,8 +919,39 @@ static JsVal s_replace_impl(JsVal self, JsVal *a, int n, int all) {
     }
     return S(concat(r, mkstr(s->s + st, s->len - st)));
 }
-static JsVal s_replace(JsVal self, JsVal *a, int n) { return s_replace_impl(self, a, n, 0); }
-static JsVal s_replaceAll(JsVal self, JsVal *a, int n) { return s_replace_impl(self, a, n, 1); }
+static JsVal s_replace(JsVal self, JsVal *a, int n) { JsObj *re = n ? as_regex(a[0]) : 0; if (re) return rx_replace(re, thisstr(self), ARG(1), 0); return s_replace_impl(self, a, n, 0); }
+static JsVal s_replaceAll(JsVal self, JsVal *a, int n) { JsObj *re = n ? as_regex(a[0]) : 0; if (re) return rx_replace(re, thisstr(self), ARG(1), 1); return s_replace_impl(self, a, n, 1); }
+static JsVal s_match(JsVal self, JsVal *a, int n) {
+    JsStr *s = thisstr(self); JsObj *re = n ? as_regex(a[0]) : 0;
+    if (!re) { JsVal r = make_regex(js_tostr(ARG(0)), cstr("")); if (ctl) return js_undef(); re = obj(r); }
+    if (!rx_flag(re, "global")) return rx_exec(re, s);
+    JsObj *out = newarr(); Prop *li = find(re->props, cstr("lastIndex")); if (li) li->v = js_num(0);
+    for (;;) {
+        JsVal m = rx_exec(re, s); if (m.t != JS_OBJ) break;
+        JsStr *t = js_tostr(obj(m)->arr[0]); arr_push(out, S(t));
+        if (!t->len && li) { int at = (int)js_tonum(li->v); if (at >= s->len) break; li->v = js_num(at + 1); }
+    }
+    return out->len ? O(out) : jnull();
+}
+static JsVal s_matchAll(JsVal self, JsVal *a, int n) {
+    JsStr *s = thisstr(self); JsObj *re = n ? as_regex(a[0]) : 0; JsObj *out = newarr();
+    if (!re) return O(out);
+    Prop *li = find(re->props, cstr("lastIndex")); if (li) li->v = js_num(0);
+    for (;;) {
+        JsVal m = rx_exec(re, s); if (m.t != JS_OBJ) break;
+        arr_push(out, m);
+        if (!rx_flag(re, "global")) break;
+        if (!js_tostr(obj(m)->arr[0])->len && li) { int at = (int)js_tonum(li->v); if (at >= s->len) break; li->v = js_num(at + 1); }
+    }
+    return O(out);
+}
+static JsVal s_search(JsVal self, JsVal *a, int n) {
+    JsStr *s = thisstr(self); JsObj *re = n ? as_regex(a[0]) : 0;
+    if (!re) return js_num(indexof(s, js_tostr(ARG(0)), 0));
+    JsObj *tmp = newobj(K_REGEX); tmp->host = re->host; tmp->props = 0; setprop(tmp, cstr("lastIndex"), js_num(0));
+    JsVal m = rx_exec(tmp, s);
+    return m.t == JS_OBJ ? getp(m, cstr("index")) : js_num(-1);
+}
 static JsVal s_repeat(JsVal self, JsVal *a, int n) { JsStr *s = thisstr(self), *r = newstr(0); int k = (int)js_tonum(ARG(0)); if (k < 0 || k > 100000 || (u64)k * s->len > 1000000) return throw_msg("RangeError: repeat"); while (k--) r = concat(r, s); return S(r); }
 static JsVal s_pad(JsVal self, JsVal *a, int n, int start) {
     JsStr *s = thisstr(self), *p = n > 1 ? js_tostr(a[1]) : cstr(" "); int w = (int)js_tonum(ARG(0));
@@ -866,13 +1063,18 @@ static const struct { const char *name; JsNative fn; u8 on; } methods[] = { /* o
     {"substring", s_substring, 1}, {"substr", s_substr, 1}, {"toUpperCase", s_upper, 1}, {"toLowerCase", s_lower, 1},
     {"toLocaleUpperCase", s_upper, 1}, {"toLocaleLowerCase", s_lower, 1},
     {"trim", s_trim, 1}, {"split", s_split, 1}, {"replace", s_replace, 1}, {"replaceAll", s_replaceAll, 1}, {"repeat", s_repeat, 1},
+    {"match", s_match, 1}, {"matchAll", s_matchAll, 1}, {"search", s_search, 1},
     {"padStart", s_padStart, 1}, {"padEnd", s_padEnd, 1}, {"concat", s_concat, 1}, {"toString", s_toString, 1 | 16},
     {"toFixed", n_toFixed, 4}, {"toString", n_toString, 4}, {"toLocaleString", s_toString, 4},
     {"push", a_push, 2}, {"pop", a_pop, 2}, {"shift", a_shift, 2}, {"unshift", a_unshift, 2}, {"slice", a_slice, 2},
     {"splice", a_splice, 2}, {"concat", a_concat, 2}, {"join", a_join, 2}, {"indexOf", a_indexOf, 2}, {"includes", a_includes, 2},
     {"reverse", a_reverse, 2}, {"forEach", a_forEach, 2}, {"map", a_map, 2}, {"filter", a_filter, 2}, {"find", a_find, 2},
     {"findIndex", a_findIndex, 2}, {"some", a_some, 2}, {"every", a_every, 2}, {"reduce", a_reduce, 2}, {"sort", a_sort, 2},
-    {"toString", s_toString, 2}, {"call", f_call, 8}, {"apply", f_apply, 8}, {"hasOwnProperty", o_hasOwn, 16},
+    {"toString", s_toString, 2}, {"call", f_call, 8}, {"apply", f_apply, 8}, {"bind", f_bind, 8}, {"hasOwnProperty", o_hasOwn, 16},
+    {"flat", a_flat, 2}, {"flatMap", a_flatMap, 2}, {"at", a_at, 2}, {"fill", a_fill, 2}, {"lastIndexOf", a_lastIndexOf, 2},
+    {"keys", a_keysA, 2}, {"entries", a_entriesA, 2}, {"values", a_valuesA, 2}, {"reduceRight", a_reduceRight, 2},
+    {"at", s_at, 1}, {"trimStart", s_trimStart, 1}, {"trimEnd", s_trimEnd, 1}, {"trimLeft", s_trimStart, 1}, {"trimRight", s_trimEnd, 1},
+    {"localeCompare", s_localeCompare, 1}, {"normalize", s_self, 1}, {"valueOf", s_self, 1}, {"codePointAt", s_charCodeAt, 1},
 };
 static JsVal method(JsVal self, JsStr *k, u8 on) {
     for (unsigned i = 0; i < sizeof methods / sizeof *methods; i++)
@@ -931,6 +1133,107 @@ static const struct { const char *name; JsNative fn; } dmethods[] = {
     {"toLocaleTimeString", d_tstr}, {"toLocaleDateString", d_dstr}, {"toLocaleString", d_str}, {"toString", d_str}, {"toISOString", d_str},
 };
 
+/* for-of・スプレッド・分割代入で繰り返せる値を配列にする (配列・文字列・Map・Set・arguments) */
+static JsObj *iter_values(JsVal v) {
+    JsObj *o = obj(v), *out = 0;
+    if (o && o->kind == K_ARR) return o;
+    out = newarr();
+    if (v.t == JS_STR) { JsStr *t = v.p; for (int i = 0; i < t->len; i++) arr_push(out, S(mkstr(t->s + i, 1))); return out; }
+    if (o && o->kind == K_MAP) { for (int i = 0; i < o->len; i++) { JsObj *pr = newarr(); arr_push(pr, o->arr[i]); arr_push(pr, o->vals[i]); arr_push(out, O(pr)); } return out; }
+    if (o && o->kind == K_SET) { for (int i = 0; i < o->len; i++) arr_push(out, o->arr[i]); return out; }
+    if (o) { Prop *len = find(o->props, cstr("length")); if (len) { int n = (int)js_tonum(len->v); for (int i = 0; i < n && i < 100000; i++) arr_push(out, getp(v, numstr(i))); return out; } }
+    throw_msg("TypeError: 繰り返せない値です");
+    return out;
+}
+
+/* ---- 正規表現 ---- */
+static void *jalloc(u64 n) { return alloc(n); }
+static JsVal make_regex(JsStr *pat, JsStr *flags) {
+    char f[8]; int k = 0; for (int i = 0; i < flags->len && k < 7; i++) f[k++] = (char)flags->s[i]; f[k] = 0;
+    Regex *re = re_compile(pat->s, pat->len, f, jalloc);
+    if (!re) return throw_str(concat(cstr("SyntaxError: 正しくない正規表現 /"), pat), "/");
+    JsObj *o = newobj(K_REGEX); o->host = re;
+    setprop(o, cstr("lastIndex"), js_num(0));
+    setprop(o, cstr("source"), S(pat)); setprop(o, cstr("flags"), S(flags));
+    int g = 0, y = 0; for (int i = 0; i < flags->len; i++) { if (flags->s[i] == 'g') g = 1; if (flags->s[i] == 'y') y = 1; }
+    setprop(o, cstr("global"), js_bool(g)); setprop(o, cstr("sticky"), js_bool(y));
+    return O(o);
+}
+static JsObj *as_regex(JsVal v) { JsObj *o = obj(v); return o && o->kind == K_REGEX ? o : 0; }
+static int rx_flag(JsObj *o, const char *name) { Prop *p = find(o->props, cstr(name)); return p && js_truthy(p->v); }
+/* 1 回照合して、結果の配列 (なければ null)。lastIndex も進める */
+static JsVal rx_exec(JsObj *o, JsStr *s) {
+    Regex *re = o->host; int g = rx_flag(o, "global"), y = rx_flag(o, "sticky");
+    Prop *li = find(o->props, cstr("lastIndex"));
+    int start = (g || y) && li ? (int)js_tonum(li->v) : 0;
+    if (start < 0 || start > s->len) { if (li) li->v = js_num(0); return jnull(); }
+    int nc = re_ncap(re); int *caps = alloc(sizeof(int) * (u64)(nc + 1) * 2);
+    if (!re_exec(re, s->s, s->len, start, y, caps)) { if (li && (g || y)) li->v = js_num(0); return jnull(); }
+    if (li && (g || y)) li->v = js_num(caps[1] == caps[0] && caps[1] == start ? caps[1] : caps[1]);
+    JsObj *a = newarr();
+    for (int i = 0; i <= nc; i++) arr_push(a, caps[i * 2] < 0 ? js_undef() : S(mkstr(s->s + caps[i * 2], caps[i * 2 + 1] - caps[i * 2])));
+    setprop(a, cstr("index"), js_num(caps[0])); setprop(a, cstr("input"), S(s));
+    const c16 *nm; int idx; JsObj *groups = 0;
+    for (int i = 0; re_group_name(re, i, &nm, &idx); i++) { if (!groups) groups = newobj(K_OBJ); int l = 0; while (nm[l]) l++; setprop(groups, mkstr(nm, l), idx < a->len ? a->arr[idx] : js_undef()); }
+    setprop(a, cstr("groups"), groups ? O(groups) : js_undef());
+    return O(a);
+}
+static JsVal r_test(JsVal self, JsVal *a, int n) { JsObj *o = as_regex(self); if (!o) return js_bool(0); return js_bool(rx_exec(o, js_tostr(ARG(0))).t == JS_OBJ); }
+static JsVal r_exec(JsVal self, JsVal *a, int n) { JsObj *o = as_regex(self); if (!o) return jnull(); return rx_exec(o, js_tostr(ARG(0))); }
+static JsVal r_toString(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *o = as_regex(self); if (!o) return S(cstr("")); return S(concat(concat(concat(cstr("/"), js_tostr(find(o->props, cstr("source"))->v)), cstr("/")), js_tostr(find(o->props, cstr("flags"))->v))); }
+/* $1 $& $` $' $<名前> $$ を展開する */
+static JsStr *expand(JsStr *rep, JsObj *m, JsStr *s) {
+    JsStr *r = newstr(0); int start = (int)js_tonum(getp(O(m), cstr("index"))), mlen = m->len ? js_tostr(m->arr[0])->len : 0;
+    for (int i = 0; i < rep->len; i++) {
+        c16 c = rep->s[i];
+        if (c == '$' && i + 1 < rep->len) {
+            c16 d = rep->s[i + 1];
+            if (d == '$') { r = concat(r, mkstr(&d, 1)); i++; continue; }
+            if (d == '&') { r = concat(r, mkstr(s->s + start, mlen)); i++; continue; }
+            if (d == '`') { r = concat(r, mkstr(s->s, start)); i++; continue; }
+            if (d == '\'') { r = concat(r, mkstr(s->s + start + mlen, s->len - start - mlen)); i++; continue; }
+            if (d >= '0' && d <= '9') {
+                int k = d - '0', used = 1;
+                if (i + 2 < rep->len && rep->s[i + 2] >= '0' && rep->s[i + 2] <= '9' && k * 10 + rep->s[i + 2] - '0' < m->len) k = k * 10 + rep->s[i + 2] - '0', used = 2;
+                if (k > 0 && k < m->len) { if (m->arr[k].t == JS_STR) r = concat(r, m->arr[k].p); i += used; continue; }
+            }
+            if (d == '<') {
+                int e = i + 2; while (e < rep->len && rep->s[e] != '>') e++;
+                JsObj *g = obj(getp(O(m), cstr("groups")));
+                if (g && e < rep->len) { Prop *p = find(g->props, mkstr(rep->s + i + 2, e - i - 2)); if (p && p->v.t == JS_STR) r = concat(r, p->v.p); i = e; continue; }
+            }
+        }
+        r = concat(r, mkstr(&c, 1));
+    }
+    return r;
+}
+static JsVal rx_replace(JsObj *o, JsStr *s, JsVal rep, int forceAll) {
+    int g = forceAll || rx_flag(o, "global");
+    Prop *li = find(o->props, cstr("lastIndex"));
+    if (g && li) li->v = js_num(0);
+    JsStr *r = newstr(0); int pos = 0;
+    for (;;) {
+        JsVal mv = g ? rx_exec(o, s) : rx_exec(o, s);
+        if (mv.t != JS_OBJ || ctl) break;
+        JsObj *m = mv.p; int at = (int)js_tonum(getp(mv, cstr("index"))), len = js_tostr(m->arr[0])->len;
+        r = concat(r, mkstr(s->s + pos, at - pos));
+        if (js_is_func(rep)) {
+            JsVal args[20]; int k = 0;
+            for (int i = 0; i < m->len && k < 18; i++) args[k++] = m->arr[i];
+            args[k++] = js_num(at); args[k++] = S(s);
+            r = concat(r, js_tostr(call(rep, js_undef(), args, k)));
+        } else r = concat(r, expand(js_tostr(rep), m, s));
+        pos = at + len;
+        if (!g) break;
+        if (!len) { /* 空の一致: 1 文字進める */
+            if (at >= s->len) break;
+            if (li) li->v = js_num(at + 1);
+        }
+    }
+    if (li && g) li->v = js_num(0);
+    return S(concat(r, mkstr(s->s + pos, s->len - pos)));
+}
+
 /* ---- プロパティ ---- */
 static JsVal getp(JsVal o, JsStr *k) {
     switch (o.t) {
@@ -950,8 +1253,15 @@ static JsVal getp(JsVal o, JsStr *k) {
         int i = arr_index(k); if (i >= 0) return i < x->len ? x->arr[i] : js_undef();
     }
     if (x->kind == K_HOST) { int found = 0; JsVal v = host_get(x->host, k, &found); if (found) return v; }
+    if (x->kind == K_MAP || x->kind == K_SET) { JsVal r = coll_get(o, x, k); if (r.t != JS_UNDEF || js_key_is(k, "size")) return r; }
+    if (x->kind == K_PROMISE) { JsVal r = promise_get(o, k); if (r.t != JS_UNDEF) return r; }
+    if (x->kind == K_REGEX) {
+        if (js_key_is(k, "test")) return bound_native(r_test, o);
+        if (js_key_is(k, "exec")) return bound_native(r_exec, o);
+        if (js_key_is(k, "toString")) return bound_native(r_toString, o);
+    }
     if (x->kind == K_DATE) for (unsigned i = 0; i < sizeof dmethods / sizeof *dmethods; i++) if (js_key_is(k, dmethods[i].name)) return bound_native(dmethods[i].fn, o);
-    for (JsObj *p = x; p; p = p->proto) { Prop *f = find(p->props, k); if (f) return f->v; }
+    for (JsObj *p = x; p; p = p->proto) { Prop *f = find(p->props, k); if (f) return f->acc ? (js_is_func(f->get) ? call(f->get, o, 0, 0) : js_undef()) : f->v; }
     if (x->kind == K_ARR) return method(o, k, 2);
     if (x->kind == K_FUNC || x->kind == K_NATIVE) {
         if (js_key_is(k, "prototype") && x->kind == K_FUNC) { JsVal pr = js_object(); setprop(x, cstr("prototype"), pr); return pr; }
@@ -969,6 +1279,7 @@ static void putp(JsVal o, JsStr *k, JsVal v) {
         if (js_key_is(k, "length")) { int l = (int)js_tonum(v); if (l >= 0 && l <= x->len) x->len = l; return; }
     }
     if (x->kind == K_HOST && host_set(x->host, k, v)) return;
+    for (JsObj *p = x; p; p = p->proto) { Prop *f = find(p->props, k); if (f && f->acc) { if (js_is_func(f->set)) call(f->set, o, &v, 1); return; } if (f) break; } /* setter */
     setprop(x, k, v);
 }
 
@@ -1055,21 +1366,32 @@ static JsVal call(JsVal f, JsVal self, JsVal *args, int n) {
     if (!o || (o->kind != K_FUNC && o->kind != K_NATIVE)) return throw_msg("TypeError: 関数ではありません");
     if (o->kind == K_NATIVE) return o->nat(o->bound.t ? o->bound : self, args, n);
     static int depth;
+    if (o->fields || o->derived) { /* class のコンストラクター: フィールドを先に入れる */
+        JsObj *th = obj(self);
+        if (th) for (Node *fd = o->fields; fd; fd = fd->next) {
+            Env *fe = alloc(sizeof(Env)); fe->up = o->fenv; fe->hasSelf = 1; fe->self = self;
+            JsVal v = fd->b ? eval(fd->b, fe) : js_undef(); if (ctl) return js_undef();
+            putp(self, fd->c ? js_tostr(eval(fd->c, fe)) : fd->s, v);
+        }
+        if (!o->fn) { /* コンストラクターなし: extends なら親を同じ引数で */
+            Prop *sp = o->derived ? find(o->fenv->vars, cstr("%super")) : 0;
+            if (sp) { JsObj *so = obj(sp->v); if (so && so->kind == K_NATIVE) { JsVal r = so->nat(js_bool(1), args, n); JsObj *ro = obj(r); if (th && ro) for (Prop *q = ro->props; q; q = q->next) setprop(th, q->k, q->v); } else call(sp->v, self, args, n); }
+            return js_undef();
+        }
+    }
     if (depth > 200) return throw_msg("RangeError: 呼び出しが深すぎます");
     Node *fn = o->fn;
     Env *env = alloc(sizeof(Env)); env->up = o->env;
     if (!(fn->flag & 1)) { env->hasSelf = 1; env->self = self; } /* アロー関数は外の this */
     int i = 0;
-    for (Node *p = fn->a; p; p = p->next, i++) {
-        if (p->flag) { JsObj *rest = newarr(); for (int k = i; k < n; k++) arr_push(rest, args[k]); define(env, p->s, O(rest)); break; }
-        JsVal v = i < n ? args[i] : js_undef();
-        if (v.t == JS_UNDEF && p->b) v = eval(p->b, env);
-        define(env, p->s, v);
+    for (Node *p = fn->a; p && !ctl; p = p->next, i++) {
+        if (p->flag == 1) { JsObj *rest = newarr(); for (int k = i; k < n; k++) arr_push(rest, args[k]); bind_pattern(p, O(rest), env, env, 0); break; }
+        bind_pattern(p, i < n ? args[i] : js_undef(), env, env, 0);
     }
     if (fn->flag & 4) { JsObj *ar = newarr(); for (int k = 0; k < n; k++) arr_push(ar, args[k]); define(env, cstr("arguments"), O(ar)); } /* 使うときだけ */
     depth++;
     JsVal r = js_undef();
-    if (fn->flag == 3) r = eval(fn->b, env);
+    if ((fn->flag & 3) == 3) r = eval(fn->b, env);
     else {
         hoist(fn->b->a, env);
         exec_list(fn->b->a, env);
@@ -1077,12 +1399,18 @@ static JsVal call(JsVal f, JsVal self, JsVal *args, int n) {
         else if (ctl == C_BREAK || ctl == C_CONT) ctl = C_NONE;
     }
     depth--;
+    if (fn->flag & 8) { /* async: 結果を Promise にする */
+        JsObj *pr = promise_new();
+        if (ctl == C_THROW) { JsVal ex = ctlv; ctl = C_NONE; promise_settle(pr, ex, 2); }
+        else promise_resolve(pr, r);
+        return O(pr);
+    }
     return r;
 }
 static int collect_args(Node *a, Env *e, JsVal *out, int max) {
     int n = 0;
     for (; a && n < max; a = a->next) {
-        if (a->t == N_SPREAD) { JsVal v = eval(a->a, e); JsObj *o = obj(v); if (o && o->kind == K_ARR) for (int i = 0; i < o->len && n < max; i++) out[n++] = o->arr[i]; }
+        if (a->t == N_SPREAD) { JsVal v = eval(a->a, e); if (ctl) return n; JsObj *o = iter_values(v); for (int i = 0; i < o->len && n < max; i++) out[n++] = o->arr[i]; }
         else out[n++] = eval(a, e);
         if (ctl) return n;
     }
@@ -1103,6 +1431,7 @@ static JsVal eval(Node *n, Env *e) {
     if (++steps > stepMax) return throw_msg("スクリプトの実行が長すぎます");
     switch (n->t) {
     case N_NUM: return js_num(n->n);
+    case N_REGEX: return make_regex(n->s, n->a->s);
     case N_STR: return S(n->s);
     case N_THIS: return self_of(e);
     case N_ID: {
@@ -1120,7 +1449,7 @@ static JsVal eval(Node *n, Env *e) {
     case N_ARR: {
         JsObj *a = newarr();
         for (Node *x = n->a; x && !ctl; x = x->next) {
-            if (x->t == N_SPREAD) { JsVal v = eval(x->a, e); JsObj *o = obj(v); if (o && o->kind == K_ARR) for (int i = 0; i < o->len; i++) arr_push(a, o->arr[i]); else if (v.t == JS_STR) { JsStr *s = v.p; for (int i = 0; i < s->len; i++) arr_push(a, S(mkstr(s->s + i, 1))); } }
+            if (x->t == N_SPREAD) { JsVal v = eval(x->a, e); if (ctl) break; JsObj *o = iter_values(v); for (int i = 0; i < o->len; i++) arr_push(a, o->arr[i]); }
             else arr_push(a, eval(x, e));
         }
         return O(a);
@@ -1130,22 +1459,36 @@ static JsVal eval(Node *n, Env *e) {
         for (Node *p = n->a; p && !ctl; p = p->next) {
             if (p->flag == 2) { JsObj *src = obj(eval(p->b, e)); if (src) for (Prop *q = src->props; q; q = q->next) setprop(o, q->k, q->v); continue; }
             JsStr *k = p->c ? js_tostr(eval(p->c, e)) : p->s;
-            setprop(o, k, eval(p->b, e));
+            JsVal v = eval(p->b, e);
+            if (p->flag == 3 || p->flag == 4) { setprop(o, k, js_undef()); Prop *pr = find(o->props, k); pr->acc = 1; if (p->flag == 3) pr->get = v; else pr->set = v; }
+            else setprop(o, k, v);
         }
         return O(o);
     }
     case N_FUNC: return make_func(n, e);
-    case N_MEMBER: { JsVal o = eval(n->a, e); if (ctl) return o; return getp(o, n->s); }
-    case N_INDEX: { JsVal o = eval(n->a, e); if (ctl) return o; JsVal k = eval(n->b, e); if (ctl) return k; return getp(o, js_tostr(k)); }
+    case N_MEMBER: { JsVal o = eval(n->a, e); if (ctl) return o; if ((n->flag & 3) && (o.t == JS_UNDEF || o.t == JS_NULL)) return js_undef(); return getp(o, n->s); }
+    case N_INDEX: { JsVal o = eval(n->a, e); if (ctl) return o; if ((n->flag & 3) && (o.t == JS_UNDEF || o.t == JS_NULL)) return js_undef(); JsVal k = eval(n->b, e); if (ctl) return k; return getp(o, js_tostr(k)); }
+    case N_SUPERMEMBER: { Prop *sp = lookup(e, cstr("%superproto")); if (!sp) return throw_msg("SyntaxError: super"); return getp(sp->v, n->s); }
+    case N_SUPERCALL: {
+        Prop *sp = lookup(e, cstr("%super")); if (!sp) return throw_msg("SyntaxError: super");
+        JsVal args[32]; int argc = collect_args(n->b, e, args, 32); if (ctl) return js_undef();
+        JsObj *so = obj(sp->v);
+        if (so && so->kind == K_NATIVE) { JsVal r = so->nat(js_bool(1), args, argc); JsObj *th = obj(self_of(e)), *ro = obj(r); if (th && ro) for (Prop *q = ro->props; q; q = q->next) setprop(th, q->k, q->v); return js_undef(); } /* extends Error など */
+        call(sp->v, self_of(e), args, argc);
+        return js_undef();
+    }
+    case N_CLASS: return make_class(n, e);
     case N_CALL: {
         JsVal self = js_undef(), f;
-        if (n->a->t == N_MEMBER || n->a->t == N_INDEX) {
+        if (n->a->t == N_SUPERMEMBER) { f = eval(n->a, e); self = self_of(e); if (ctl) return js_undef(); }
+        else if (n->a->t == N_MEMBER || n->a->t == N_INDEX) {
             self = eval(n->a->a, e); if (ctl) return self;
+            if ((n->a->flag & 3) && (self.t == JS_UNDEF || self.t == JS_NULL)) return js_undef();
             JsStr *k = n->a->t == N_MEMBER ? n->a->s : js_tostr(eval(n->a->b, e));
             if (ctl) return js_undef();
             f = getp(self, k);
-            if (!ctl && !js_is_func(f)) return throw_str(concat(k, cstr("")), " is not a function");
-        } else { f = eval(n->a, e); if (!ctl && !js_is_func(f)) return throw_msg("TypeError: 関数ではありません"); }
+            if (!ctl && !js_is_func(f)) { if ((n->flag & 3) && (f.t == JS_UNDEF || f.t == JS_NULL)) return js_undef(); return throw_str(concat(k, cstr("")), " is not a function"); }
+        } else { f = eval(n->a, e); if (!ctl && !js_is_func(f)) { if ((n->flag & 3) && (f.t == JS_UNDEF || f.t == JS_NULL)) return js_undef(); return throw_msg("TypeError: 関数ではありません"); } }
         if (ctl) return js_undef();
         JsVal args[32]; int argc = collect_args(n->b, e, args, 32);
         if (ctl) return js_undef();
@@ -1182,7 +1525,7 @@ static JsVal eval(Node *n, Env *e) {
         case '+': return js_num(js_tonum(v));
         case '~': return js_num((double)(int)~toi32(js_tonum(v)));
         case 'v': return js_undef();
-        default: return v; /* await */
+        default: return await_value(v); /* await */
         }
     }
     case N_BIN: { JsVal a = eval(n->a, e); if (ctl) return a; JsVal b = eval(n->b, e); if (ctl) return b; return binop(n->op, a, b); }
@@ -1210,7 +1553,7 @@ static JsVal eval(Node *n, Env *e) {
             }
         }
         if (ctl) return v;
-        assign_to(n->a, v, e);
+        if (n->a->t == N_ARRPAT || n->a->t == N_OBJPAT) bind_pattern(n->a, v, e, 0, 1); else assign_to(n->a, v, e);
         return v;
     }
     case N_UPDATE: {
@@ -1222,19 +1565,299 @@ static JsVal eval(Node *n, Env *e) {
     default: return throw_msg("SyntaxError: 式ではありません");
     }
 }
+
+/* ---- 分割代入: pat に v を割り当てる (assignMode なら既存の変数・プロパティへ代入) ---- */
+static void bind_pattern(Node *pat, JsVal v, Env *e, Env *target, int assignMode) {
+    if (ctl || !pat) return;
+    if (v.t == JS_UNDEF && pat->d) { v = eval(pat->d, e); if (ctl) return; }
+    switch (pat->t) {
+    case N_ID: if (assignMode) assign_to(pat, v, e); else define(target, pat->s, v); return;
+    case N_MEMBER: case N_INDEX: assign_to(pat, v, e); return;
+    case N_EMPTY: return;
+    case N_ARRPAT: {
+        if (v.t == JS_UNDEF || v.t == JS_NULL) { throw_msg("TypeError: undefined は分割できません"); return; }
+        JsObj *items = iter_values(v); if (ctl) return;
+        int i = 0;
+        for (Node *el = pat->a; el && !ctl; el = el->next, i++) {
+            if (el->flag == 1) { JsObj *rest = newarr(); for (int k = i; k < items->len; k++) arr_push(rest, items->arr[k]); bind_pattern(el, O(rest), e, target, assignMode); return; }
+            bind_pattern(el, i < items->len ? items->arr[i] : js_undef(), e, target, assignMode);
+        }
+        return;
+    }
+    case N_OBJPAT: {
+        if (v.t == JS_UNDEF || v.t == JS_NULL) { throw_msg("TypeError: undefined は分割できません"); return; }
+        JsStr *used[64]; int nu = 0;
+        for (Node *pp = pat->a; pp && !ctl; pp = pp->next) {
+            if (pp->flag == 1) { /* ...rest */
+                JsObj *rest = newobj(K_OBJ); rest->proto = objectProto; JsObj *src = obj(v);
+                if (src) for (Prop *q = src->props; q; q = q->next) { int skip = 0; for (int k = 0; k < nu; k++) if (streq(used[k], q->k)) skip = 1; if (!skip && !q->acc) setprop(rest, q->k, q->v); }
+                bind_pattern(pp->b, O(rest), e, target, assignMode);
+                continue;
+            }
+            JsStr *k = pp->c ? js_tostr(eval(pp->c, e)) : pp->s;
+            if (nu < 64) used[nu++] = k;
+            bind_pattern(pp->b, getp(v, k), e, target, assignMode);
+        }
+        return;
+    }
+    }
+    throw_msg("SyntaxError: 分割代入の形が正しくありません");
+}
+
+/* ---- class ---- */
+static Node emptyFn;
+static JsVal make_class(Node *c, Env *e) {
+    JsVal sup = js_undef();
+    if (c->a) { sup = eval(c->a, e); if (ctl) return js_undef(); if (sup.t != JS_NULL && !js_is_func(sup)) return throw_msg("TypeError: extends には関数 (class) が必要です"); }
+    Env *ce = alloc(sizeof(Env)); ce->up = e;
+    JsObj *protoObj = newobj(K_OBJ); protoObj->proto = objectProto;
+    if (sup.t == JS_OBJ) {
+        define(ce, cstr("%super"), sup);
+        JsVal sp = getp(sup, cstr("prototype")); if (ctl) return js_undef();
+        define(ce, cstr("%superproto"), sp);
+        if (obj(sp)) protoObj->proto = obj(sp);
+    }
+    Node *ctorNode = 0;
+    for (Node *m = c->b; m; m = m->next) if (m->flag == 0 && m->s && js_key_is(m->s, "constructor") && m->op[0] != 's') ctorNode = m->b;
+    JsObj *ctor = newobj(K_FUNC); ctor->fn = ctorNode; ctor->env = ce; ctor->fenv = ce; ctor->derived = sup.t == JS_OBJ;
+    if (!ctorNode) { ctor->derived = 1; } /* 中身のないコンストラクター (fields と親の呼び出しだけ) */
+    if (sup.t == JS_OBJ) ctor->proto = obj(sup); /* static も親から */
+    setprop(ctor, cstr("prototype"), O(protoObj));
+    setprop(protoObj, cstr("constructor"), O(ctor));
+    if (c->s) define(ce, c->s, O(ctor));
+    Node **ftail = &ctor->fields;
+    for (Node *m = c->b; m && !ctl; m = m->next) {
+        int isStatic = m->op[0] == 's';
+        JsObj *target = isStatic ? ctor : protoObj;
+        if (m->flag == 1) { /* フィールド */
+            if (isStatic) { Env *fe = alloc(sizeof(Env)); fe->up = ce; fe->hasSelf = 1; fe->self = O(ctor); JsVal v = m->b ? eval(m->b, fe) : js_undef(); setprop(ctor, m->c ? js_tostr(eval(m->c, fe)) : m->s, v); }
+            else { Node *cp = node(N_PROP); *cp = *m; cp->next = 0; *ftail = cp; ftail = &cp->next; }
+            continue;
+        }
+        if (m->b == ctorNode && !isStatic) continue;
+        JsStr *k = m->c ? js_tostr(eval(m->c, ce)) : m->s;
+        JsVal f = make_func(m->b, ce);
+        if (m->flag == 3 || m->flag == 4) { Prop *pr = find(target->props, k); if (!pr) { setprop(target, k, js_undef()); pr = find(target->props, k); } pr->acc = 1; if (m->flag == 3) pr->get = f; else pr->set = f; }
+        else setprop(target, k, f);
+    }
+    (void)emptyFn;
+    return O(ctor);
+}
+
+/* ---- Map / Set ---- */
+static int same_value_zero(JsVal a, JsVal b) { if (a.t == JS_NUM && b.t == JS_NUM && a.n != a.n && b.n != b.n) return 1; return strict_eq(a, b); }
+static int coll_find(JsObj *m, JsVal k) { for (int i = 0; i < m->len; i++) if (same_value_zero(m->arr[i], k)) return i; return -1; }
+static void coll_put(JsObj *m, JsVal k, JsVal v) {
+    int i = coll_find(m, k);
+    if (i >= 0) { if (m->vals) m->vals[i] = v; return; }
+    int oldCap = m->cap; arr_push(m, k);
+    if (m->kind == K_MAP) {
+        if (m->cap != oldCap || !m->vals) { JsVal *nv = alloc(sizeof(JsVal) * (u64)m->cap); if (m->vals) mcopy(nv, m->vals, sizeof(JsVal) * (u64)(m->len - 1)); m->vals = nv; }
+        m->vals[m->len - 1] = v;
+    }
+}
+static JsObj *coll_self(JsVal self) { JsObj *o = obj(self); return o && (o->kind == K_MAP || o->kind == K_SET) ? o : 0; }
+static JsVal c_get(JsVal self, JsVal *a, int n) { JsObj *m = coll_self(self); int i = m ? coll_find(m, ARG(0)) : -1; return i >= 0 && m->vals ? m->vals[i] : js_undef(); }
+static JsVal c_set(JsVal self, JsVal *a, int n) { JsObj *m = coll_self(self); if (m) coll_put(m, ARG(0), ARG(1)); return self; }
+static JsVal c_add(JsVal self, JsVal *a, int n) { JsObj *m = coll_self(self); if (m) coll_put(m, ARG(0), js_undef()); return self; }
+static JsVal c_has(JsVal self, JsVal *a, int n) { JsObj *m = coll_self(self); return js_bool(m && coll_find(m, ARG(0)) >= 0); }
+static JsVal c_delete(JsVal self, JsVal *a, int n) {
+    JsObj *m = coll_self(self); int i = m ? coll_find(m, ARG(0)) : -1; if (i < 0) return js_bool(0);
+    for (int j = i; j + 1 < m->len; j++) { m->arr[j] = m->arr[j + 1]; if (m->vals) m->vals[j] = m->vals[j + 1]; }
+    m->len--; return js_bool(1);
+}
+static JsVal c_clear(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *m = coll_self(self); if (m) m->len = 0; return js_undef(); }
+static JsVal c_forEach(JsVal self, JsVal *a, int n) {
+    JsObj *m = coll_self(self); if (!m) return js_undef();
+    for (int i = 0; i < m->len && !ctl; i++) { JsVal args[3] = {m->kind == K_MAP ? m->vals[i] : m->arr[i], m->arr[i], self}; call(ARG(0), n > 1 ? a[1] : js_undef(), args, 3); }
+    return js_undef();
+}
+static JsVal c_keys(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *m = coll_self(self), *r = newarr(); if (m) for (int i = 0; i < m->len; i++) arr_push(r, m->arr[i]); return O(r); }
+static JsVal c_values(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *m = coll_self(self), *r = newarr(); if (m) for (int i = 0; i < m->len; i++) arr_push(r, m->kind == K_MAP ? m->vals[i] : m->arr[i]); return O(r); }
+static JsVal c_entries(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *m = coll_self(self); return m ? O(iter_values(self)) : O(newarr()); }
+static JsVal coll_get(JsVal o, JsObj *x, JsStr *k) {
+    if (js_key_is(k, "size")) return js_num(x->len);
+    static const struct { const char *n; JsNative f; int map; } t[] = {
+        {"get", c_get, 1}, {"set", c_set, 1}, {"add", c_add, 2}, {"has", c_has, 3}, {"delete", c_delete, 3}, {"clear", c_clear, 3},
+        {"forEach", c_forEach, 3}, {"keys", c_keys, 3}, {"values", c_values, 3}, {"entries", c_entries, 3}};
+    for (unsigned i = 0; i < sizeof t / sizeof *t; i++) if ((t[i].map & (x->kind == K_MAP ? 1 : 2)) && js_key_is(k, t[i].n)) return bound_native(t[i].f, o);
+    if (js_key_is(k, "@@iterator")) return bound_native(x->kind == K_MAP ? c_entries : c_values, o);
+    return js_undef();
+}
+static JsVal g_Map(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *m = newobj(K_MAP);
+    if (n && a[0].t != JS_UNDEF && a[0].t != JS_NULL) { JsObj *items = iter_values(a[0]); for (int i = 0; i < items->len && !ctl; i++) { JsVal pr = items->arr[i]; coll_put(m, getp(pr, cstr("0")), getp(pr, cstr("1"))); } }
+    return O(m);
+}
+static JsVal g_Set(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *m = newobj(K_SET);
+    if (n && a[0].t != JS_UNDEF && a[0].t != JS_NULL) { JsObj *items = iter_values(a[0]); for (int i = 0; i < items->len; i++) coll_put(m, items->arr[i], js_undef()); }
+    return O(m);
+}
+
+/* ---- Promise (マイクロタスクで then を呼ぶ) ---- */
+static JsObj *jobs; static int jobHead; /* (関数, 値, 子の Promise, 0 成功 1 失敗) の 4 つずつ */
+static JsObj *promise_new(void) { JsObj *p = newobj(K_PROMISE); p->len = 0; p->arr = 0; p->cap = 0; p->ms = 0; return p; }
+static int pstate(JsObj *p) { return (int)p->ms; } /* 0 待ち 1 成功 2 失敗 */
+static void enqueue(JsVal fn, JsVal v, JsObj *child, int rejected) {
+    if (!jobs) jobs = newarr();
+    arr_push(jobs, fn); arr_push(jobs, v); arr_push(jobs, child ? O(child) : js_undef()); arr_push(jobs, js_num(rejected));
+}
+static void promise_settle(JsObj *p, JsVal v, int state) {
+    if (pstate(p)) return;
+    p->ms = state; p->pval = v;
+    for (int i = 0; i + 2 < p->len; i += 3) enqueue(p->arr[i + (state == 2 ? 1 : 0)], v, obj(p->arr[i + 2]), state == 2);
+    p->len = 0;
+}
+static JsVal res_cb(JsVal self, JsVal *a, int n) { JsObj *p = obj(self); if (p && p->kind == K_PROMISE) promise_resolve(p, ARG(0)); return js_undef(); }
+static JsVal rej_cb(JsVal self, JsVal *a, int n) { JsObj *p = obj(self); if (p && p->kind == K_PROMISE) promise_settle(p, ARG(0), 2); return js_undef(); }
+static void promise_then(JsObj *p, JsVal onF, JsVal onR, JsObj *child) {
+    if (pstate(p) == 0) { arr_push(p, onF); arr_push(p, onR); arr_push(p, child ? O(child) : js_undef()); }
+    else enqueue(pstate(p) == 2 ? onR : onF, p->pval, child, pstate(p) == 2);
+}
+static void promise_resolve(JsObj *p, JsVal v) {
+    JsObj *o = obj(v);
+    if (o == p) { promise_settle(p, js_cstr("TypeError: 自分自身"), 2); return; }
+    if (o && o->kind == K_PROMISE) { promise_then(o, bound_native(res_cb, O(p)), bound_native(rej_cb, O(p)), 0); return; }
+    if (o && js_is_func(getp(v, cstr("then")))) { JsVal args[2] = {bound_native(res_cb, O(p)), bound_native(rej_cb, O(p))}; call(getp(v, cstr("then")), v, args, 2); if (ctl == C_THROW) { JsVal ex = ctlv; ctl = C_NONE; promise_settle(p, ex, 2); } return; }
+    promise_settle(p, v, 1);
+}
+static int inJobs;
+static void run_microtasks(void) {
+    if (inJobs || !jobs) return;
+    inJobs = 1;
+    for (int guard = 0; jobHead < jobs->len && guard < 100000; guard++) {
+        JsVal fn = jobs->arr[jobHead], v = jobs->arr[jobHead + 1]; JsObj *child = obj(jobs->arr[jobHead + 2]); int rejected = (int)jobs->arr[jobHead + 3].n;
+        jobHead += 4;
+        if (!js_is_func(fn)) { if (child) { if (rejected) promise_settle(child, v, 2); else promise_resolve(child, v); } continue; }
+        int save = ctl; ctl = C_NONE;
+        JsVal r = call(fn, js_undef(), &v, 1);
+        if (ctl == C_THROW) { JsVal ex = ctlv; ctl = C_NONE; if (child) promise_settle(child, ex, 2); }
+        else { ctl = C_NONE; if (child) promise_resolve(child, r); }
+        ctl = save;
+    }
+    if (jobHead >= jobs->len) { jobs->len = 0; jobHead = 0; }
+    inJobs = 0;
+}
+static JsVal await_value(JsVal v) {
+    JsObj *p = obj(v);
+    if (!p || p->kind != K_PROMISE) return v;
+    if (!pstate(p)) { int save = inJobs; inJobs = 0; run_microtasks(); inJobs = save; } /* できるところまで進める */
+    if (pstate(p) == 1) return p->pval;
+    if (pstate(p) == 2) { ctl = C_THROW; ctlv = p->pval; return js_undef(); }
+    return js_undef(); /* まだ終わらない (タイマー待ちなど): undefined で続ける */
+}
+static JsVal p_then(JsVal self, JsVal *a, int n) { JsObj *p = obj(self); JsObj *child = promise_new(); if (p && p->kind == K_PROMISE) promise_then(p, ARG(0), ARG(1), child); return O(child); }
+static JsVal p_catch(JsVal self, JsVal *a, int n) { JsObj *p = obj(self); JsObj *child = promise_new(); if (p && p->kind == K_PROMISE) promise_then(p, js_undef(), ARG(0), child); return O(child); }
+static JsVal p_finally(JsVal self, JsVal *a, int n) { JsObj *p = obj(self); JsObj *child = promise_new(); if (p && p->kind == K_PROMISE) promise_then(p, ARG(0), ARG(0), child); return O(child); }
+static JsVal promise_get(JsVal o, JsStr *k) {
+    if (js_key_is(k, "then")) return bound_native(p_then, o);
+    if (js_key_is(k, "catch")) return bound_native(p_catch, o);
+    if (js_key_is(k, "finally")) return bound_native(p_finally, o);
+    return js_undef();
+}
+static JsVal g_Promise(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *p = promise_new();
+    if (n && js_is_func(a[0])) { JsVal args[2] = {bound_native(res_cb, O(p)), bound_native(rej_cb, O(p))}; call(a[0], js_undef(), args, 2); if (ctl == C_THROW) { JsVal ex = ctlv; ctl = C_NONE; promise_settle(p, ex, 2); } }
+    return O(p);
+}
+static JsVal g_resolve(JsVal self, JsVal *a, int n) { (void)self; JsObj *o = obj(ARG(0)); if (o && o->kind == K_PROMISE) return a[0]; JsObj *p = promise_new(); promise_resolve(p, ARG(0)); return O(p); }
+static JsVal g_reject(JsVal self, JsVal *a, int n) { (void)self; JsObj *p = promise_new(); promise_settle(p, ARG(0), 2); return O(p); }
+static JsVal all_cb(JsVal self, JsVal *a, int n) { /* self = [結果の配列, 残り数, 親, 番号] */
+    JsObj *st = obj(self); JsObj *res = obj(st->arr[0]); int idx = (int)st->arr[3].n;
+    res->arr[idx] = ARG(0); JsObj *left = obj(st->arr[1]);
+    if (--left->len == 0) promise_resolve(obj(st->arr[2]), O(res));
+    return js_undef();
+}
+static JsVal g_all(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *p = promise_new(); JsObj *items = iter_values(ARG(0)); if (ctl) return js_undef();
+    JsObj *res = newarr(); for (int i = 0; i < items->len; i++) arr_push(res, js_undef());
+    JsObj *left = newarr(); left->len = items->len;
+    if (!items->len) { promise_resolve(p, O(res)); return O(p); }
+    for (int i = 0; i < items->len; i++) {
+        JsObj *st = newarr(); arr_push(st, O(res)); arr_push(st, O(left)); arr_push(st, O(p)); arr_push(st, js_num(i));
+        JsObj *q = promise_new(); promise_resolve(q, items->arr[i]);
+        promise_then(q, bound_native(all_cb, O(st)), bound_native(rej_cb, O(p)), 0);
+    }
+    return O(p);
+}
+static JsVal g_race(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *p = promise_new(); JsObj *items = iter_values(ARG(0)); if (ctl) return js_undef();
+    for (int i = 0; i < items->len; i++) { JsObj *q = promise_new(); promise_resolve(q, items->arr[i]); promise_then(q, bound_native(res_cb, O(p)), bound_native(rej_cb, O(p)), 0); }
+    return O(p);
+}
+
+/* ---- bind・そのほかの組み込み ---- */
+static JsVal bound_call(JsVal self, JsVal *a, int n) {
+    JsObj *b = obj(self); JsVal args[32]; int k = 0;
+    for (int i = 0; i < b->len && k < 32; i++) args[k++] = b->arr[i];
+    for (int i = 0; i < n && k < 32; i++) args[k++] = a[i];
+    return call(O((JsObj *)b->host), b->thisArg, args, k);
+}
+static JsVal f_bind(JsVal self, JsVal *a, int n) {
+    if (!js_is_func(self)) return throw_msg("TypeError: bind");
+    JsObj *b = newobj(K_NATIVE); b->nat = bound_call; b->host = obj(self); b->thisArg = ARG(0);
+    for (int i = 1; i < n; i++) arr_push(b, a[i]);
+    b->bound = O(b);
+    return O(b);
+}
+static JsVal o_create(JsVal self, JsVal *a, int n) { (void)self; JsObj *o = newobj(K_OBJ); o->proto = obj(ARG(0)); return O(o); }
+static JsVal o_getProto(JsVal self, JsVal *a, int n) { (void)self; JsObj *o = obj(ARG(0)); if (o && o->kind == K_ARR && !o->proto) return O(arrayProto); return o && o->proto ? O(o->proto) : jnull(); }
+static JsVal o_setProto(JsVal self, JsVal *a, int n) { (void)self; JsObj *o = obj(ARG(0)); if (o) o->proto = obj(ARG(1)); return ARG(0); }
+static JsVal o_defineProperty(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *o = obj(ARG(0)), *d = obj(ARG(2)); if (!o || !d) return ARG(0);
+    JsStr *k = js_tostr(ARG(1)); JsVal g = getp(ARG(2), cstr("get")), st = getp(ARG(2), cstr("set"));
+    if (js_is_func(g) || js_is_func(st)) { setprop(o, k, js_undef()); Prop *pr = find(o->props, k); pr->acc = 1; pr->get = g; pr->set = st; }
+    else putp(ARG(0), k, getp(ARG(2), cstr("value")));
+    return ARG(0);
+}
+static JsVal o_defineProperties(JsVal self, JsVal *a, int n) { JsObj *d = obj(ARG(1)); if (d) for (Prop *q = d->props; q; q = q->next) { JsVal args[3] = {ARG(0), S(q->k), q->v}; o_defineProperty(self, args, 3); } return ARG(0); }
+static JsVal o_identity(JsVal self, JsVal *a, int n) { (void)self; return ARG(0); }
+static JsVal o_fromEntries(JsVal self, JsVal *a, int n) { (void)self; JsObj *o = newobj(K_OBJ); o->proto = objectProto; JsObj *items = iter_values(ARG(0)); for (int i = 0; i < items->len && !ctl; i++) setprop(o, js_tostr(getp(items->arr[i], cstr("0"))), getp(items->arr[i], cstr("1"))); return O(o); }
+static JsVal o_is(JsVal self, JsVal *a, int n) { (void)self; return js_bool(same_value_zero(ARG(0), ARG(1))); }
+static JsVal a_flat_impl(JsObj *src, int depth, JsObj *out) { for (int i = 0; i < src->len; i++) { JsObj *x = obj(src->arr[i]); if (x && x->kind == K_ARR && depth > 0) a_flat_impl(x, depth - 1, out); else arr_push(out, src->arr[i]); } return O(out); }
+static JsVal a_flat(JsVal self, JsVal *a, int n) { JsObj *o = thisarr(self); return a_flat_impl(o, n && a[0].t != JS_UNDEF ? (int)js_tonum(a[0]) : 1, newarr()); }
+static JsVal a_flatMap(JsVal self, JsVal *a, int n) { JsVal m = a_map(self, a, n); if (ctl) return m; return a_flat_impl(obj(m), 1, newarr()); }
+static JsVal a_at(JsVal self, JsVal *a, int n) { JsObj *o = thisarr(self); int i = (int)js_tonum(ARG(0)); if (i < 0) i += o->len; return i >= 0 && i < o->len ? o->arr[i] : js_undef(); }
+static JsVal a_fill(JsVal self, JsVal *a, int n) { JsObj *o = thisarr(self); int b = n > 1 ? clampi(js_tonum(a[1]), o->len) : 0, e = n > 2 ? clampi(js_tonum(a[2]), o->len) : o->len; for (int i = b; i < e; i++) o->arr[i] = ARG(0); return self; }
+static JsVal a_lastIndexOf(JsVal self, JsVal *a, int n) { JsObj *o = thisarr(self); for (int i = o->len - 1; i >= 0; i--) if (strict_eq(o->arr[i], ARG(0))) return js_num(i); return js_num(-1); }
+static JsVal a_keysA(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *o = thisarr(self), *r = newarr(); for (int i = 0; i < o->len; i++) arr_push(r, js_num(i)); return O(r); }
+static JsVal a_entriesA(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *o = thisarr(self), *r = newarr(); for (int i = 0; i < o->len; i++) { JsObj *pr = newarr(); arr_push(pr, js_num(i)); arr_push(pr, o->arr[i]); arr_push(r, O(pr)); } return O(r); }
+static JsVal a_valuesA(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsObj *o = thisarr(self), *r = newarr(); for (int i = 0; i < o->len; i++) arr_push(r, o->arr[i]); return O(r); }
+static JsVal a_reduceRight(JsVal self, JsVal *a, int n) { JsObj *o = thisarr(self); int i = o->len - 1; JsVal acc; if (n > 1) acc = a[1]; else { if (i < 0) return throw_msg("TypeError: reduceRight"); acc = o->arr[i--]; } for (; i >= 0 && !ctl; i--) { JsVal args[3] = {acc, o->arr[i], js_num(i)}; acc = call(ARG(0), js_undef(), args, 3); } return acc; }
+static JsVal a_of(JsVal self, JsVal *a, int n) { (void)self; JsObj *r = newarr(); for (int i = 0; i < n; i++) arr_push(r, a[i]); return O(r); }
+static JsVal s_at(JsVal self, JsVal *a, int n) { JsStr *s = thisstr(self); int i = (int)js_tonum(ARG(0)); if (i < 0) i += s->len; return i >= 0 && i < s->len ? S(mkstr(s->s + i, 1)) : js_undef(); }
+static JsVal s_trimStart(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsStr *s = thisstr(self); int b = 0; while (b < s->len && isspace16(s->s[b])) b++; return S(mkstr(s->s + b, s->len - b)); }
+static JsVal s_trimEnd(JsVal self, JsVal *a, int n) { (void)a; (void)n; JsStr *s = thisstr(self); int e = s->len; while (e && isspace16(s->s[e - 1])) e--; return S(mkstr(s->s, e)); }
+static JsVal s_localeCompare(JsVal self, JsVal *a, int n) { int r = cmpstr(thisstr(self), js_tostr(ARG(0))); return js_num(r < 0 ? -1 : r > 0); }
+static JsVal s_self(JsVal self, JsVal *a, int n) { (void)a; (void)n; return S(thisstr(self)); }
+static JsVal n_isInteger(JsVal self, JsVal *a, int n) { (void)self; JsVal v = ARG(0); return js_bool(v.t == JS_NUM && v.n == dfloor(v.n) && v.n - v.n == 0); }
+static JsVal n_isNaNs(JsVal self, JsVal *a, int n) { (void)self; JsVal v = ARG(0); return js_bool(v.t == JS_NUM && v.n != v.n); }
+static double datan(double x) { /* 逆正接 */
+    int neg = x < 0; if (neg) x = -x;
+    int inv = x > 1; if (inv) x = 1 / x;
+    int red = x > 0.2679491924311228; if (red) x = (x * 1.7320508075688772 - 1) / (1.7320508075688772 + x);
+    double x2 = x * x, t = x, r = x; for (int k = 3; k < 41; k += 2) { t *= -x2; r += t / k; }
+    if (red) r += 0.5235987755982988; if (inv) r = 1.5707963267948966 - r;
+    return neg ? -r : r;
+}
+static JsVal m_atan(JsVal s, JsVal *a, int n) { (void)s; return js_num(datan(js_tonum(ARG(0)))); }
+static JsVal m_atan2(JsVal s, JsVal *a, int n) { (void)s; double y = js_tonum(ARG(0)), x = js_tonum(ARG(1)); const double PI = 3.141592653589793; if (x > 0) return js_num(datan(y / x)); if (x < 0) return js_num(datan(y / x) + (y >= 0 ? PI : -PI)); return js_num(y > 0 ? PI / 2 : y < 0 ? -PI / 2 : 0); }
+static JsVal m_asin(JsVal s, JsVal *a, int n) { (void)s; double x = js_tonum(ARG(0)); return js_num(datan(x / dsqrt(1 - x * x))); }
+static JsVal m_acos(JsVal s, JsVal *a, int n) { (void)s; double x = js_tonum(ARG(0)); return js_num(1.5707963267948966 - datan(x / dsqrt(1 - x * x))); }
+static JsVal m_log2(JsVal s, JsVal *a, int n) { (void)s; return js_num(dlog(js_tonum(ARG(0))) / 0.6931471805599453); }
+static JsVal m_log10(JsVal s, JsVal *a, int n) { (void)s; return js_num(dlog(js_tonum(ARG(0))) / 2.302585092994046); }
+static JsVal m_cbrt(JsVal s, JsVal *a, int n) { (void)s; double x = js_tonum(ARG(0)); double r = dexp(dlog(x < 0 ? -x : x) / 3); return js_num(x < 0 ? -r : r); }
+static JsVal m_hypot(JsVal s, JsVal *a, int n) { (void)s; double t = 0; for (int i = 0; i < n; i++) { double v = js_tonum(a[i]); t += v * v; } return js_num(dsqrt(t)); }
+static int symCount;
+static JsVal g_Symbol(JsVal self, JsVal *a, int n) { (void)self; JsStr *d = n ? js_tostr(a[0]) : newstr(0); JsStr *s = concat(concat(cstr("@@sym"), numstr(++symCount)), concat(cstr(":"), d)); return S(s); } /* 簡易: 重ならない文字列 */
 static void declare(Node *v, Env *e, Env *fnEnv) {
     for (Node *d = v->a; d && !ctl; d = d->next) {
         JsVal val = d->a ? eval(d->a, e) : js_undef();
         if (ctl) return;
         Env *target = v->flag == 0 ? fnEnv : e;
         if (!d->flag) { if (v->flag == 0 && !d->a && find(target->vars, d->s)) continue; define(target, d->s, val); continue; }
-        int i = 0;
-        for (Node *p = d->c; p; p = p->next, i++) { /* 分割代入 */
-            JsVal x = d->flag == 2 ? getp(val, numstr(i)) : getp(val, p->s);
-            if (ctl) return;
-            if (x.t == JS_UNDEF && p->d) x = eval(p->d, e);
-            define(target, p->b ? p->b->s : p->s, x);
-        }
+        bind_pattern(d->c, val, e, target, 0); /* 分割代入 */
     }
 }
 static Env *fnenv_of(Env *e) { for (Env *x = e; x; x = x->up) if (x->hasSelf || !x->up) return x; return e; }
@@ -1247,17 +1870,17 @@ static void exec(Node *s, Env *e) {
     case N_VAR: if (s->flag != 9) declare(s, e, fnenv_of(e)); return;
     case N_EMPTY: return;
     case N_BLOCK: {
-        if (!has_decl(s->a)) { exec_list(s->a, e); return; } /* 宣言がなければ新しい置き場はいらない */
-        Env *b = alloc(sizeof(Env)); b->up = e; hoist(s->a, b); exec_list(s->a, b); return;
+        if (!has_decl(s->a)) exec_list(s->a, e); /* 宣言がなければ新しい置き場はいらない */
+        else { Env *b = alloc(sizeof(Env)); b->up = e; hoist(s->a, b); exec_list(s->a, b); }
+        if (s->lab && ctl == C_BREAK && ctlLabel && ctlLabel->len == s->lab->len && !memcmp(ctlLabel->s, s->lab->s, (u64)s->lab->len * 2)) ctl = C_NONE, ctlLabel = 0; /* ラベル付きブロック */
+        return;
     }
     case N_IF: { JsVal c = eval(s->a, e); if (ctl) return; exec(js_truthy(c) ? s->b : s->c, e); return; }
     case N_WHILE: case N_DO:
         for (int first = 1;; first = 0) {
             if (!(s->t == N_DO && first)) { JsVal c = eval(s->a, e); if (ctl || !js_truthy(c)) return; }
             exec(s->b, e);
-            if (ctl == C_BREAK) { ctl = C_NONE; return; }
-            if (ctl == C_CONT) ctl = C_NONE;
-            if (ctl) return;
+            if (loop_ctl(s)) return;
         }
     case N_FOR: {
         Env *le = alloc(sizeof(Env)); le->up = e;
@@ -1268,9 +1891,7 @@ static void exec(Node *s, Env *e) {
             if (s->flag) { it = alloc(sizeof(Env)); it->up = e; for (Prop *p = le->vars; p; p = p->next) define(it, p->k, p->v); } /* let は回ごとに別 */
             if (s->b) { JsVal c = eval(s->b, it); if (ctl || !js_truthy(c)) return; }
             exec(s->d, it);
-            if (ctl == C_BREAK) { ctl = C_NONE; return; }
-            if (ctl == C_CONT) ctl = C_NONE;
-            if (ctl) return;
+            if (loop_ctl(s)) return;
             if (s->flag) for (Prop *p = it->vars; p; p = p->next) { Prop *q = find(le->vars, p->k); if (q) q->v = p->v; }
             if (s->c) eval(s->c, le);
         }
@@ -1279,35 +1900,32 @@ static void exec(Node *s, Env *e) {
         JsVal src = eval(s->a, e); if (ctl) return;
         JsObj *keys = newarr();
         JsObj *o = obj(src);
-        if (s->flag) { /* of: 値 */
-            if (o && o->kind == K_ARR) for (int i = 0; i < o->len; i++) arr_push(keys, o->arr[i]);
-            else if (src.t == JS_STR) { JsStr *t = src.p; for (int i = 0; i < t->len; i++) arr_push(keys, S(mkstr(t->s + i, 1))); }
-            else { throw_msg("TypeError: 繰り返せません"); return; }
-        } else if (o) { /* in: 名前 */
+        if (s->flag) { keys = iter_values(src); if (ctl) return; if (keys == o) { JsObj *cp = newarr(); for (int i = 0; i < o->len; i++) arr_push(cp, o->arr[i]); keys = cp; } } /* of: 値 */
+        else if (o) { /* in: 名前 */
             if (o->kind == K_ARR) for (int i = 0; i < o->len; i++) arr_push(keys, S(numstr(i)));
             for (Prop *p = o->props; p; p = p->next) arr_push(keys, S(p->k));
         }
         for (int i = 0; i < keys->len; i++) {
             Env *it = e;
             if (s->c && s->c->flag != 0) { it = alloc(sizeof(Env)); it->up = e; } /* let / const は回ごとに別 */
-            if (s->c) define(s->c->flag == 0 ? fnenv_of(e) : it, s->s, keys->arr[i]);
+            if (s->d) bind_pattern(s->d, keys->arr[i], it, s->c && s->c->flag == 0 ? fnenv_of(e) : it, 0);
+            else if (s->c) define(s->c->flag == 0 ? fnenv_of(e) : it, s->s, keys->arr[i]);
             else { Node id = {0}; id.t = N_ID; id.s = s->s; assign_to(&id, keys->arr[i], e); }
             exec(s->b, it);
-            if (ctl == C_BREAK) { ctl = C_NONE; return; }
-            if (ctl == C_CONT) ctl = C_NONE;
-            if (ctl) return;
+            if (loop_ctl(s)) return;
         }
         return;
     }
     case N_RETURN: { JsVal v = s->a ? eval(s->a, e) : js_undef(); if (ctl) return; ctl = C_RETURN; ctlv = v; return; }
-    case N_BREAK: ctl = C_BREAK; return;
-    case N_CONT: ctl = C_CONT; return;
+    case N_BREAK: ctl = C_BREAK; ctlLabel = s->s; return;
+    case N_CONT: ctl = C_CONT; ctlLabel = s->s; return;
+    case N_CLASSDECL: { JsVal c = make_class(s->a, e); if (!ctl) define(e, s->a->s, c); return; }
     case N_THROW: { JsVal v = eval(s->a, e); if (ctl) return; ctl = C_THROW; ctlv = v; return; }
     case N_TRY: {
         exec(s->a, e);
         if (ctl == C_THROW && s->b) {
             JsVal ex = ctlv; ctl = C_NONE;
-            Env *c = alloc(sizeof(Env)); c->up = e; if (s->s) define(c, s->s, ex);
+            Env *c = alloc(sizeof(Env)); c->up = e; if (s->s) define(c, s->s, ex); else if (s->d) bind_pattern(s->d, ex, c, c, 0);
             exec(s->b, c);
         }
         if (s->c) { int sc = ctl; JsVal sv = ctlv; ctl = C_NONE; exec(s->c, e); if (!ctl) ctl = sc, ctlv = sv; }
@@ -1320,7 +1938,7 @@ static void exec(Node *s, Env *e) {
         for (Node *c = s->b; c && !start; c = c->next) if (c->a) { JsVal x = eval(c->a, b); if (ctl) return; if (strict_eq(v, x)) start = c; }
         if (!start) for (Node *c = s->b; c; c = c->next) if (!c->a) start = c;
         for (Node *c = start; c && !ctl; c = c->next) exec_list(c->b, b);
-        if (ctl == C_BREAK) ctl = C_NONE;
+        if (ctl == C_BREAK && !ctlLabel) ctl = C_NONE; /* switch の break */
         return;
     }
     default: eval(s, e); return;
@@ -1386,6 +2004,12 @@ static JsVal g_Date(JsVal self, JsVal *a, int n) {
     }
     if (self.t != JS_BOOL) return S(date_str(d->ms, 0)); /* new なしで呼ぶと文字列 */
     return O(d);
+}
+static JsVal g_RegExp(JsVal self, JsVal *a, int n) {
+    (void)self; JsObj *src = n ? as_regex(a[0]) : 0;
+    JsStr *pat = src ? js_tostr(find(src->props, cstr("source"))->v) : js_tostr(n && a[0].t != JS_UNDEF ? a[0] : js_cstr("(?:)"));
+    JsStr *fl = n > 1 && a[1].t != JS_UNDEF ? js_tostr(a[1]) : src ? js_tostr(find(src->props, cstr("flags"))->v) : newstr(0);
+    return make_regex(pat, fl);
 }
 static JsVal g_now(JsVal self, JsVal *a, int n) { (void)self; (void)a; (void)n; return js_num(now_ms()); }
 static JsVal g_Error(JsVal self, JsVal *a, int n) { (void)self; JsObj *e = newobj(K_ERR); setprop(e, cstr("message"), n ? S(js_tostr(a[0])) : S(newstr(0))); return O(e); }
@@ -1470,7 +2094,7 @@ static JsObj *mkns(const char *name) { JsObj *o = newobj(K_OBJ); setprop(globalO
 static void fnprop(JsObj *o, const char *name, JsNative f) { setprop(o, cstr(name), js_native(f)); }
 
 void js_reset(void *mem, u64 size) {
-    heap = mem; heapSize = size; heapUsed = 0; oom = 0; spareUsed = 0;
+    heap = mem; heapSize = size; heapUsed = 0; oom = 0; spareUsed = 0; jobs = 0; jobHead = 0; inJobs = 0; symCount = 0;
     ctl = C_NONE; failed = 0; steps = 0;
     global = alloc(sizeof(Env)); global->hasSelf = 1;
     globalObj = newobj(K_OBJ);
@@ -1486,14 +2110,33 @@ void js_reset(void *mem, u64 size) {
     setprop(obj(arr), cstr("prototype"), O(arrayProto));
     JsVal ob = js_native(g_Object); js_global("Object", ob); fnprop(obj(ob), "keys", g_keys); fnprop(obj(ob), "values", g_values);
     fnprop(obj(ob), "entries", g_entries); fnprop(obj(ob), "assign", g_assign);
+    fnprop(obj(ob), "create", o_create); fnprop(obj(ob), "getPrototypeOf", o_getProto); fnprop(obj(ob), "setPrototypeOf", o_setProto);
+    fnprop(obj(ob), "defineProperty", o_defineProperty); fnprop(obj(ob), "defineProperties", o_defineProperties);
+    fnprop(obj(ob), "freeze", o_identity); fnprop(obj(ob), "seal", o_identity); fnprop(obj(ob), "preventExtensions", o_identity);
+    fnprop(obj(ob), "fromEntries", o_fromEntries); fnprop(obj(ob), "getOwnPropertyNames", g_keys); fnprop(obj(ob), "is", o_is);
     setprop(obj(ob), cstr("prototype"), O(objectProto));
     fnprop(obj(find(globalObj->props, cstr("String"))->v), "fromCharCode", g_fromCharCode);
+    js_global("RegExp", js_native(g_RegExp));
+    js_global("Map", js_native(g_Map)); js_global("Set", js_native(g_Set)); js_global("WeakMap", js_native(g_Map)); js_global("WeakSet", js_native(g_Set));
+    JsVal pr = js_native(g_Promise); js_global("Promise", pr);
+    fnprop(obj(pr), "resolve", g_resolve); fnprop(obj(pr), "reject", g_reject); fnprop(obj(pr), "all", g_all); fnprop(obj(pr), "race", g_race); fnprop(obj(pr), "allSettled", g_all);
+    JsVal sym = js_native(g_Symbol); js_global("Symbol", sym); setprop(obj(sym), cstr("iterator"), js_cstr("@@iterator"));
+    fnprop(obj(find(globalObj->props, cstr("Number"))->v), "isInteger", n_isInteger);
+    fnprop(obj(find(globalObj->props, cstr("Number"))->v), "isNaN", n_isNaNs);
+    fnprop(obj(find(globalObj->props, cstr("Number"))->v), "isFinite", g_isFinite);
+    fnprop(obj(find(globalObj->props, cstr("Number"))->v), "parseFloat", g_parseFloat);
+    fnprop(obj(find(globalObj->props, cstr("Number"))->v), "parseInt", g_parseInt);
+    setprop(obj(find(globalObj->props, cstr("Number"))->v), cstr("MAX_SAFE_INTEGER"), js_num(9007199254740991.0));
+    setprop(obj(find(globalObj->props, cstr("Number"))->v), cstr("EPSILON"), js_num(2.220446049250313e-16));
+    fnprop(obj(arr), "of", a_of);
     JsVal date = js_native(g_Date); js_global("Date", date); fnprop(obj(date), "now", g_now);
     JsObj *m = mkns("Math");
     fnprop(m, "floor", m_floor); fnprop(m, "ceil", m_ceil); fnprop(m, "round", m_round); fnprop(m, "abs", m_abs);
     fnprop(m, "sqrt", m_sqrt); fnprop(m, "sin", m_sin); fnprop(m, "cos", m_cos); fnprop(m, "tan", m_tan); fnprop(m, "log", m_log);
     fnprop(m, "exp", m_exp); fnprop(m, "trunc", m_trunc); fnprop(m, "sign", m_sign); fnprop(m, "pow", m_pow);
     fnprop(m, "random", m_random); fnprop(m, "min", m_min); fnprop(m, "max", m_max);
+    fnprop(m, "atan", m_atan); fnprop(m, "atan2", m_atan2); fnprop(m, "asin", m_asin); fnprop(m, "acos", m_acos);
+    fnprop(m, "log2", m_log2); fnprop(m, "log10", m_log10); fnprop(m, "cbrt", m_cbrt); fnprop(m, "hypot", m_hypot);
     setprop(m, cstr("PI"), js_num(3.141592653589793)); setprop(m, cstr("E"), js_num(2.718281828459045));
     JsObj *j = mkns("JSON"); fnprop(j, "stringify", g_stringify); fnprop(j, "parse", g_jsonparse);
     ctl = C_NONE;
@@ -1510,6 +2153,7 @@ int js_run(const c16 *src, int len) {
     if (failed) return 0;
     hoist(head, global);
     exec_list(head, global);
+    if (ctl != C_THROW) { int save = ctl; ctl = C_NONE; run_microtasks(); if (ctl != C_THROW) ctl = save; }
     if (ctl == C_THROW) {
         JsStr *m = js_tostr(ctlv); int i = 0;
         for (; i < m->len && i < 190; i++) errmsg[i] = m->s[i];
@@ -1525,6 +2169,7 @@ int js_call(JsVal fn, JsVal self, JsVal *args, int n) {
     ctl = C_NONE; steps = 0; errmsg[0] = 0; stepMax = 2000000;
     if (oom) return 1; /* メモリを使い切ったページでは何もしない */
     call(fn, self, args, n);
+    if (ctl != C_THROW) { ctl = C_NONE; run_microtasks(); }
     if (ctl == C_THROW) {
         JsStr *m = js_tostr(ctlv); int i = 0;
         for (; i < m->len && i < 190; i++) errmsg[i] = m->s[i];

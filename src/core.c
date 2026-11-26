@@ -320,6 +320,7 @@ typedef struct { int open, max, min, x, y, w, h; } Win; /* min: 最小化 (タ�
 static Win wins[APP_COUNT];
 static int order[APP_COUNT], nwin; /* 後ろほど手前 */
 static int dirty = 1, mx, my, mdown, drag = -1, dragx, dragy, hasPointer;
+static int busyApp = -1, cancelReq; /* 通信中のアプリ: そのアプリへの操作は Esc (中止) だけ。ほかのアプリは動かし続ける */
 /* サイズ変更中の窓と、つかんだ縁 (1 左 / 2 右 / 4 下) */
 static int resizing = -1, redges, rsx, rsy, rx0, ry0, rw0, rh0;
 static u64 lastClick; static int lastClickApp = -1;
@@ -656,11 +657,11 @@ static void press(void) {
             u64 now = net_ms();
             int dbl = lastClickApp == a && now - lastClick < 400;
             lastClick = now; lastClickApp = a;
-            if (mx >= x + w - 26) wm_close(a);
+            if (mx >= x + w - 26) { if (a != busyApp) wm_close(a); }   /* 通信中は閉じない */
             else if (mx >= x + w - 52) wm_minimize(a);
             else if (mx >= x + w - 78 || dbl) { toggle_max(a); lastClickApp = -1; }
             else if (!wins[a].max) { drag = a; dragx = mx - x; dragy = my - y; }
-        } else if (apps[a].click) apps[a].click(mx - x - 1, my - y - TITLE);
+        } else if (apps[a].click && a != busyApp) apps[a].click(mx - x - 1, my - y - TITLE);
         return;
     }
 }
@@ -670,7 +671,9 @@ static void pointer_update(int x, int y, int down) {
     if (x != mx || y != my || down != mdown) dirty = 1;
     mx = x; my = y;
     if (menu && mx < MENU_W && my >= menu_y() + 4 && my < menu_y() + 4 + MENU_N * MENU_ROW) msel = (my - menu_y() - 4) / MENU_ROW;
-    if (down && !mdown) press();
+    int pressed = down && !mdown;
+    mdown = down; /* 先に更新する (押した処理の中で読み込み中に OS が回っても、同じクリックを二度扱わない) */
+    if (pressed) press();
     if (!down) drag = resizing = -1;
     if (resizing >= 0) {
         Win *w = &wins[resizing];
@@ -685,7 +688,6 @@ static void pointer_update(int x, int y, int down) {
         wins[drag].x = nx < 60 - apps[drag].w ? 60 - apps[drag].w : nx > SW - 60 ? SW - 60 : nx;
         wins[drag].y = ny < 0 ? 0 : ny > SH - DOCK - TITLE ? SH - DOCK - TITLE : ny;
     }
-    mdown = down;
 }
 /* ホイール: マウスの下の窓へ */
 void pointer_wheel(int dy) {
@@ -695,6 +697,7 @@ void pointer_wheel(int dy) {
         if (wins[a].min) continue;
         geometry(a, &x, &y, &w, &h);
         if (mx < x || my < y || mx >= x + w || my >= y + h) continue;
+        if (a == busyApp) return;
         if (apps[a].wheel) apps[a].wheel(dy);
         else if (apps[a].key) for (int k = 0; k < 3 * (dy < 0 ? -dy : dy); k++) { Key kk = {(u16)(dy < 0 ? 1 : 2), 0}; apps[a].key(kk); }
         dirty = 1;
@@ -742,9 +745,16 @@ static void pointer_poll(void) {
     }
 }
 
+void ui_busy(int app) { busyApp = app; cancelReq = 0; dirty = 1; }
+int ui_is_busy(int app) { return busyApp >= 0 && busyApp == app; }
 static void key(Key k) {
     int top = top_app();
     dirty = 1;
+    if (busyApp >= 0 && top == busyApp) {                                 /* 通信中のアプリが手前 */
+        if (k.scan == 0x17) { cancelReq = 1; return; }                    /* Esc で中止 */
+        if (k.scan == 0x0B || (k.scan >= 0x0F && k.scan <= 0x13)) {}      /* 窓の切り替え・ほかのアプリは開ける */
+        else return;
+    }
     if (k.scan == 0x17) { menu ^= 1; msel = 0; return; }                 /* Esc */
     if (menu) {
         if (k.scan == 1) msel = (msel + MENU_N - 1) % MENU_N;
@@ -754,7 +764,7 @@ static void key(Key k) {
         if (menu || !k.scan) return;
     }
     if (k.scan == 0x0B) { if (nwin > 1) raise(order[0]); }               /* F1 */
-    else if (k.scan == 0x0E) { if (top >= 0) wm_close(top); }            /* F4 */
+    else if (k.scan == 0x0E) { if (top >= 0 && top != busyApp) wm_close(top); } /* F4 (通信中は閉じない) */
     else if (k.scan >= 0x0F && k.scan <= 0x13) wm_open(k.scan - 0x0F);   /* F5-F9 */
     else if (k.scan == 0x14) { if (top >= 0) toggle_max(top); }          /* F10 */
     else if (top >= 0 && apps[top].key) apps[top].key(k);
@@ -764,6 +774,28 @@ static Status die(const c16 *msg) {
     struct { void *reset; Status (*out)(void *, const c16 *); } *con = ST->conOut;
     con->out(con, msg);
     BS->Stall(10000000);
+    return 1;
+}
+
+/* 通信の待ち時間に呼ばれる: 入力・ほかのアプリ・描き直しを 1 回分進める。中止なら 0 */
+int ui_pump(void) {
+    static u64 last; static int inPump;
+    if (inPump || !back) return 1;
+    inPump = 1;
+    Key k; int special;
+    for (int i = 0; i < 16 && vkbd_read(&k, &special); i++) { if (special) { k.scan = special == 1 ? K_KANA : K_EISU; k.ch = 0; } key(k); }
+    for (int i = 0; i < 16 && !ST->conIn->ReadKeyStroke(ST->conIn, &k); i++) key(k);
+    pointer_poll(); tablet_poll(); sound_poll();
+    u64 now = net_ms();
+    if (now - last >= 40) { /* 25 回/秒まで */
+        last = now;
+        for (int i = 0; i < nwin; i++) if (order[i] != busyApp && apps[order[i]].tick) apps[order[i]].tick();
+        if (noteTicks && !--noteTicks) dirty = 1;
+        if (busyApp >= 0) dirty = 1; /* 読み込み中の印を動かす */
+        if (dirty) { dirty = 0; draw(); }
+    }
+    inPump = 0;
+    if (cancelReq) { cancelReq = 0; return 0; }
     return 1;
 }
 

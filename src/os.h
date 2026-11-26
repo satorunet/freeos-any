@@ -49,6 +49,8 @@ void invalidate(void);
 void redraw(void); /* 時間のかかる処理の前にすぐ描き直す */
 void *memset(void *d, int c, u64 n);
 void power(int reboot);
+void ui_busy(int app);    /* 通信中のアプリ (-1 で終わり)。その間も OS は動き、Esc で中止 */
+int ui_is_busy(int app);
 
 typedef struct {
     const c16 *title;
@@ -66,7 +68,7 @@ void edit_open(const c16 *path);
 void kana_feed(c16 c, void (*out)(c16)); void kana_flush(void (*out)(c16)); int kana_pending(c16 *out); /* ローマ字かな入力 */
 
 /* ---- 起動アニメーションと起動音 ---- */
-#define FREEOS_VER u"2.2"
+#define FREEOS_VER u"2.3"
 u32 *screen(void);                     /* 描画先 (SW x SH) */
 void screen_show(void);                /* 描画先を画面に出す */
 void desktop_compose(void);            /* デスクトップを描画先に描く (画面には出さない) */

@@ -145,16 +145,17 @@ void tablet_poll(void) {
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         u32 id = t.used->ring[t.seen % t.size].id % t.size;
         InputEvent e = t.ev[id];
-        if (e.type == 3 && e.code == 0) t.x = e.value;
-        else if (e.type == 3 && e.code == 1) t.y = e.value;
-        else if (e.type == 1 && (e.code == 0x110 || e.code == 0x14A)) t.down = e.value != 0;
-        else if (e.type == 2 && e.code == 8) pointer_wheel(-(int)e.value); /* ホイール (上が +) */
-        else if (e.type == 0) pointer_abs(t.x, t.y, t.down); /* 1回分の入力がそろった */
-        t.avail->ring[t.avail->idx % t.size] = id; /* 同じ場所を装置に返す */
+        /* 先に返してから処理する (処理の中でまた tablet_poll が呼ばれても、同じイベントを二度読まない) */
+        t.avail->ring[t.avail->idx % t.size] = id;
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         t.avail->idx++;
         t.seen++;
         used++;
+        if (e.type == 3 && e.code == 0) t.x = e.value;
+        else if (e.type == 3 && e.code == 1) t.y = e.value;
+        else if (e.type == 1 && (e.code == 0x110 || e.code == 0x14A)) t.down = e.value != 0;
+        else if (e.type == 2 && e.code == 8) pointer_wheel(-(int)e.value); /* ホイール (上が +) */
+        else if (e.type == 0) { kick(); pointer_abs(t.x, t.y, t.down); } /* 1回分の入力がそろった */
     }
     if (used) { __atomic_thread_fence(__ATOMIC_SEQ_CST); kick(); }
 }
