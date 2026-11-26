@@ -1,0 +1,124 @@
+#!/bin/bash
+# FreeOS Any.app の本体。FreeOS Any を仮想マシンとして起動する (QEMU が必要)。
+RES="$(cd "$(dirname "$0")/../Resources" && pwd)" || exit 1
+DATA="${FREEOS_DATA:-$HOME/Library/Application Support/FreeOS Any}"
+
+# ask 本文 ボタン... : 最後のボタンが既定。押されたボタン名を表示する
+ask() {
+    local msg=$1; shift
+    osascript - "$msg" "$@" <<'OSA'
+on run argv
+    set theButtons to items 2 thru -1 of argv
+    activate
+    return button returned of (display dialog (item 1 of argv) with title "FreeOS Any" buttons theButtons default button (count of theButtons))
+end run
+OSA
+}
+fail() { ask "$1" "閉じる" >/dev/null; exit 1; }
+
+if pgrep -f "qemu-system.*FreeOS Any" >/dev/null 2>&1; then
+    fail "FreeOS Any はすでに起動しています。"
+fi
+
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+    ARCH=aarch64; VARS=edk2-arm-vars.fd
+else
+    ARCH=x86_64; VARS=edk2-i386-vars.fd
+fi
+
+# アプリからは PATH に Homebrew が入らないので直接探す
+find_in() {
+    local name=$1 d
+    for d in ${FREEOS_BIN:+"$FREEOS_BIN"} /opt/homebrew/bin /usr/local/bin /opt/local/bin; do
+        [ -x "$d/$name" ] && { echo "$d/$name"; return; }
+    done
+}
+
+mkdir -p "$DATA" || fail "保存先を作れません: $DATA"
+cd "$DATA" || fail "保存先を開けません: $DATA"
+
+QEMU=$(find_in "qemu-system-$ARCH")
+if [ -z "$QEMU" ]; then
+    BREW=$(find_in brew)
+    if [ -z "$BREW" ]; then
+        a=$(ask "起動には無料の仮想化ソフト QEMU が必要です。
+先に Homebrew を入れてから、もう一度このアプリを開いてください。" "閉じる" "Homebrew のページを開く")
+        [ "$a" = "Homebrew のページを開く" ] && open "https://brew.sh/ja/"
+        exit 0
+    fi
+    a=$(ask "起動には無料の仮想化ソフト QEMU が必要です。
+ターミナルを開いてインストールしますか?" "やめる" "インストールする")
+    [ "$a" = "インストールする" ] || exit 0
+    {
+        echo '#!/bin/bash'
+        printf '"%s" install qemu && echo && echo "完了しました。FreeOS Any をもう一度開いてください。"\n' "$BREW"
+    } > install-qemu.command
+    chmod 755 install-qemu.command
+    open -a Terminal "$DATA/install-qemu.command" || fail "ターミナルを開けません。"
+    exit 0
+fi
+
+# ディスク: 初回はアプリ内の原本を展開する。作ったファイルはこの中に残る
+VER=$(cat "$RES/VERSION")
+if [ ! -f freeos-any.img ]; then
+    gunzip -c "$RES/freeos-any.img.gz" > freeos-any.img.new && mv freeos-any.img.new freeos-any.img ||
+        fail "ディスクを作れません。空き容量を確認してください。"
+    echo "$VER" > disk-version
+elif [ "$(cat disk-version 2>/dev/null)" != "$VER" ]; then
+    # アプリの版が変わった: ファイルを残したまま OS 本体だけ入れ替える
+    cp freeos-any.img freeos-any.img.backup || fail "更新前の控えを作れません。空き容量を確認してください。"
+    mnt="$DATA/mnt"
+    mkdir -p "$mnt"
+    ok=
+    if hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -mountpoint "$mnt" freeos-any.img >/dev/null; then
+        cp "$RES"/EFI/BOOT/*.EFI "$mnt/EFI/BOOT/" && ok=1
+        hdiutil detach "$mnt" >/dev/null || hdiutil detach -force "$mnt" >/dev/null || ok=
+    fi
+    rmdir "$mnt" 2>/dev/null
+    if [ -n "$ok" ]; then
+        echo "$VER" > disk-version
+    else
+        cp freeos-any.img.backup freeos-any.img
+        ask "OS の更新に失敗しました。今までの版で起動します。" "続ける" >/dev/null
+    fi
+fi
+
+SHARE="$(dirname "$QEMU")/../share/qemu"
+if [ ! -f "fw-$ARCH-code.fd" ]; then
+    cp "$SHARE/edk2-$ARCH-code.fd" "fw-$ARCH-code.fd" || fail "UEFI ファームウェアがありません: $SHARE/edk2-$ARCH-code.fd"
+fi
+if [ ! -f "fw-$ARCH-vars.fd" ]; then
+    cp "$SHARE/$VARS" "fw-$ARCH-vars.fd" || fail "UEFI ファームウェアがありません: $SHARE/$VARS"
+fi
+chmod u+w "fw-$ARCH-vars.fd"
+
+if [ "$ARCH" = aarch64 ]; then
+    MACHINE=(-machine virt -device virtio-gpu-pci -device qemu-xhci -device usb-kbd)
+else
+    MACHINE=(-machine q35)
+fi
+
+# ファイル転送用: Mac の localhost のポートを仮想マシンの 80 番につなぐ
+PORT=8080
+while [ $PORT -lt 8100 ] && (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; do PORT=$((PORT + 1)); done
+
+run() { # 引数: CPU の指定
+    "$QEMU" -name "FreeOS Any  (ファイル転送: localhost:$PORT)" -m 512 "$@" "${MACHINE[@]}" \
+        -drive "if=pflash,format=raw,readonly=on,file=fw-$ARCH-code.fd" \
+        -drive "if=pflash,format=raw,file=fw-$ARCH-vars.fd" \
+        -drive "if=none,id=disk,format=raw,file=freeos-any.img" \
+        -device virtio-blk-pci,drive=disk \
+        -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:$PORT-:80" \
+        -device virtio-rng-pci -device virtio-tablet-pci $FREEOS_QEMU_EXTRA >qemu.log 2>&1
+}
+
+# Mac の仮想化支援で起動し、すぐ失敗したらエミュレーションでやり直す
+started=$SECONDS
+if [ "$(sysctl -n kern.hv_support 2>/dev/null)" = "1" ]; then
+    run -accel hvf -cpu host && exit 0
+    [ $((SECONDS - started)) -lt 20 ] || fail "FreeOS Any が異常終了しました。
+$(tail -n 5 qemu.log)"
+    cp qemu.log qemu-hvf.log
+fi
+run -accel tcg -cpu max || fail "起動できませんでした。
+$(tail -n 5 qemu.log)"

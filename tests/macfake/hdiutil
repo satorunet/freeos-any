@@ -1,0 +1,6 @@
+#!/bin/sh
+echo "HDIUTIL: $*" >> /t/out/dialog.log
+[ "$1" = attach ] || exit 0
+[ -n "$FAKE_HDI_FAIL" ] && exit 1
+eval last=\${$(($# - 1))}; mkdir -p "$last/EFI/BOOT"
+trap '' EXIT

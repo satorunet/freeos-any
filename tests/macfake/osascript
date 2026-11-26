@@ -1,0 +1,3 @@
+#!/bin/sh
+cat >/dev/null; shift; echo "DIALOG: $*" >> /t/out/dialog.log
+echo "${FAKE_BUTTON:-}"

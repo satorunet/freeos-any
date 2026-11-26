@@ -1,0 +1,2 @@
+#!/bin/sh
+case "$2" in hw.optional.arm64) echo ${FAKE_ARM:-0} ;; kern.hv_support) echo ${FAKE_HV:-0} ;; esac
