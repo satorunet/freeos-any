@@ -50,6 +50,14 @@ image: all
 	mkfs.fat -F 32 -n FREEOSANY build/freeos-any.img >/dev/null
 	mcopy -s -i build/freeos-any.img build/esp/EFI ::/
 
+# macOS で作る場合 (hdiutil と newfs_msdos を使う)
+image-mac: all
+	tools/mkimg-mac.sh
+
+# このMacで起動して試す (QEMU、hvf)
+run-mac: image-mac
+	tools/run-mac.sh
+
 # Windows の上で起動するための zip
 vmzip: image
 	python3 tools/mkvmzip.py build/freeos-any.img $(VER) windows
@@ -65,4 +73,4 @@ srcdoc:
 clean:
 	rm -rf build
 
-.PHONY: all image vmzip dmg srcdoc clean
+.PHONY: all image image-mac run-mac vmzip dmg srcdoc clean

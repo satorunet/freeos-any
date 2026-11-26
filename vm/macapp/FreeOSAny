@@ -115,7 +115,9 @@ run() { # 引数: CPU の指定
 # Mac の仮想化支援で起動し、すぐ失敗したらエミュレーションでやり直す
 started=$SECONDS
 if [ "$(sysctl -n kern.hv_support 2>/dev/null)" = "1" ]; then
-    run -accel hvf -cpu host && exit 0
+    # Intel Mac: QEMU の hvf は 1GB ページを扱えず、ファームウェアが使うと落ちる (vmx_read_mem) ので隠す
+    HVFCPU=host; [ "$ARCH" = x86_64 ] && HVFCPU=host,-pdpe1gb
+    run -accel hvf -cpu "$HVFCPU" && exit 0
     [ $((SECONDS - started)) -lt 20 ] || fail "FreeOS Any が異常終了しました。
 $(tail -n 5 qemu.log)"
     cp qemu.log qemu-hvf.log

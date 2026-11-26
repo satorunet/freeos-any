@@ -1,4 +1,4 @@
-/* FreeOS Any 標準アプリ: ターミナル、ファイル、メモ帳、スネーク、情報 */
+/* FreeOS Any 標準アプリ: ターミナル、ファイル、メモ帳、情報 */
 #include "os.h"
 #include "net.h"
 
@@ -106,11 +106,10 @@ static void run(c16 *line) {
               u"mkdir <dir>   フォルダ作成   rm <path>     ゴミ箱へ\n"
               u"write <file> <text>  1行書く calc <式>     計算\n"
               u"get <URL> [名前]  ダウンロード   web <URL>  ブラウザで開く\n"
-              u"net date mem cls files snake solitaire about reboot shutdown");
+              u"net date mem cls files solitaire about reboot shutdown");
     } else if (seq(line, u"calc")) calc(arg);
     else if (seq(line, u"cls")) tcount = 0;
     else if (seq(line, u"files")) wm_open(APP_FILES);
-    else if (seq(line, u"snake")) wm_open(APP_SNAKE);
     else if (seq(line, u"about")) wm_open(APP_ABOUT);
     else if (seq(line, u"solitaire")) wm_open(APP_SOLITAIRE);
     else if (seq(line, u"net")) {
@@ -432,53 +431,6 @@ static void edit_draw(int x, int y, int w, int h) {
 static void edit_tick(void) { if (edirty && ++eidle == 100) edit_save(), eidle = 0; } /* 約2秒で自動保存 */
 static void edit_flush(void) { flush_romaji(); edit_save(); }
 
-/* ==================== スネーク ==================== */
-#define GW 24
-#define GH 18
-static int sx[GW * GH], sy[GW * GH], slength, dx, dy, ndx, ndy, foodx, foody, dead, paused, frame;
-static u32 seed;
-static int rnd(int n) { seed = seed * 1103515245 + 12345; return (seed >> 16) % n; }
-static int occupied(int x, int y, int n) { for (int i = 0; i < n; i++) if (sx[i] == x && sy[i] == y) return 1; return 0; }
-static void food(void) { do foodx = rnd(GW), foody = rnd(GH); while (occupied(foodx, foody, slength)); }
-static void snake_reset(void) {
-    Time t; if (!ST->rt->GetTime(&t, 0)) seed ^= t.second * 7919 + t.minute * 131 + t.ns;
-    slength = 3;
-    for (int i = 0; i < 3; i++) sx[i] = 6 - i, sy[i] = 9;
-    dx = ndx = 1; dy = ndy = dead = frame = 0; paused = 1;
-    food();
-}
-static void snake_key(Key k) {
-    int x = 0, y = 0;
-    if (k.scan == K_UP) y = -1; else if (k.scan == K_DOWN) y = 1; else if (k.scan == K_LEFT) x = -1; else if (k.scan == K_RIGHT) x = 1;
-    if (k.ch == 13 && dead) snake_reset();
-    else if (k.ch == u' ') paused ^= 1;
-    else if ((x || y) && !(x == -dx && y == -dy)) ndx = x, ndy = y, paused = 0;
-}
-static void snake_tick(void) {
-    /* 手前にないときは draw が呼ばれても進めない */
-    if (!wm_active(APP_SNAKE)) { paused = 1; return; }
-    if (paused || dead || ++frame % 7) return;
-    dx = ndx; dy = ndy;
-    int x = sx[0] + dx, y = sy[0] + dy, eat = x == foodx && y == foody;
-    if (x < 0 || y < 0 || x >= GW || y >= GH || occupied(x, y, eat ? slength : slength - 1)) { dead = 1; invalidate(); return; }
-    if (eat && slength < GW * GH) slength++;
-    for (int i = slength - 1; i > 0; i--) sx[i] = sx[i - 1], sy[i] = sy[i - 1];
-    sx[0] = x; sy[0] = y;
-    if (eat) { if (slength < GW * GH) food(); else dead = 1; }
-    invalidate();
-}
-static void snake_draw(int x, int y, int w, int h) {
-    fill(x, y, w, h, 0x101820);
-    int ox = x + (w - GW * 16) / 2, oy = y + 28;
-    fill(ox, oy, GW * 16, GH * 16, 0x1B2B34);
-    fill(ox + foodx * 16 + 2, oy + foody * 16 + 2, 12, 12, 0xFF5C7A);
-    for (int i = 0; i < slength; i++) fill(ox + sx[i] * 16 + 1, oy + sy[i] * 16 + 1, 14, 14, i ? 0x4ADE80 : 0xBBF7D0);
-    c16 s[64] = u"スコア ";
-    snum(s, slength - 3, 0, 64);
-    scat(s, dead ? u"   終了! Enterで再開" : paused ? u"   矢印キーで開始" : u"   Spaceで一時停止", 64);
-    text(ox, y + 6, s, 0xFFFFFF);
-}
-
 /* ==================== 情報 ==================== */
 #if defined(__aarch64__)
 #define ARCH u"ARM64"
@@ -528,6 +480,5 @@ App apps[APP_COUNT] = {
     [APP_BROWSER]   = {u"ブラウザ", 720, 520, browser_open, browser_draw, browser_key, browser_click, 0, 0},
     [APP_TRANSFER]  = {u"ファイル転送", 440, 250, 0, transfer_draw, transfer_key, transfer_click, transfer_tick, transfer_stop},
     [APP_SOLITAIRE] = {u"ソリティア", 394, 480, solitaire_open, solitaire_draw, solitaire_key, solitaire_click, 0, 0},
-    [APP_SNAKE] = {u"スネーク", 420, 348, snake_reset, snake_draw, snake_key, 0, snake_tick, 0},
     [APP_ABOUT] = {u"情報", 440, 220, about_open, about_draw, 0, 0, 0, 0},
 };

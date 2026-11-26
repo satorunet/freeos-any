@@ -40,7 +40,7 @@ int utf8_decode(const u8 *in, u64 n, c16 *out, int cap);  /* 文字として読�
 int utf8_encode(const c16 *in, int n, u8 *out);
 
 /* ---- ウィンドウ ---- */
-enum { APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_SNAKE, APP_ABOUT, APP_COUNT };
+enum { APP_TERM, APP_FILES, APP_EDIT, APP_BROWSER, APP_TRANSFER, APP_SOLITAIRE, APP_ABOUT, APP_COUNT };
 void wm_open(int app);
 void wm_close(int app);
 int wm_active(int app); /* 一番手前か */
