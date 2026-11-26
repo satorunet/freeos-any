@@ -119,21 +119,10 @@ def about():
 
 
 def logo():
-    """起動画面と同じ FreeOS Any のロゴ"""
-    img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    k = S / 512
-    sc = lambda *p: [v * k for v in p]
-    d.rounded_rectangle(sc(36, 36, 476, 476), 100 * k, fill=(109, 93, 252, 255))
-    d.rounded_rectangle(sc(100, 130, 412, 382), 24 * k, fill=(244, 244, 250, 255))
-    d.rounded_rectangle(sc(100, 130, 412, 186), 24 * k, fill=(36, 36, 64, 255))
-    d.rectangle(sc(100, 162, 412, 186), fill=(36, 36, 64, 255))
-    ink = (109, 93, 252, 255)
-    d.line([tuple(sc(160, 350)), tuple(sc(160, 222)), tuple(sc(232, 222))], fill=ink, width=int(28 * k), joint='curve')
-    d.line([tuple(sc(160, 280)), tuple(sc(220, 280))], fill=ink, width=int(26 * k))
-    d.line([tuple(sc(270, 356)), tuple(sc(316, 218)), tuple(sc(362, 356))], fill=ink, width=int(28 * k), joint='curve')
-    d.line([tuple(sc(290, 304)), tuple(sc(342, 304))], fill=ink, width=int(24 * k))
-    return img
+    """FreeOS Any のロゴ (tools/logo.py)。小さいので Any の文字は入れない"""
+    sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+    from logo import draw_logo
+    return draw_logo(S, text=False)
 
 
 ICONS = [terminal, files, editor, browser, transfer, solitaire, calc, about, logo]

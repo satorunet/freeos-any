@@ -1,4 +1,4 @@
-/* 起動アニメーション: ロゴが現れ、窓が開き、F と A が書かれ、光が走り、名前が浮かぶ。
+/* 起動アニメーション: 角丸が現れ、虹色の ∞ が一筆で描かれ、Any が浮かび、光が走り、名前が出る。
  * キーを押すと飛ばせる。最後はデスクトップへ溶けるように切り替わる。 */
 #include "os.h"
 #include "net.h"
@@ -45,20 +45,62 @@ static float d_rrect(float px, float py, float x0, float y0, float x1, float y1,
     float ox = fmaxf_(qx, 0), oy = fmaxf_(qy, 0);
     return fsqrt(ox * ox + oy * oy) + fminf_(fmaxf_(qx, qy), 0) - r;
 }
-static float d_seg(float px, float py, float ax, float ay, float bx, float by) {
-    float vx = bx - ax, vy = by - ay, wx = px - ax, wy = py - ay;
-    float l = vx * vx + vy * vy, t = l > 0 ? clamp01((wx * vx + wy * vy) / l) : 0;
-    float dx = wx - vx * t, dy = wy - vy * t;
-    return fsqrt(dx * dx + dy * dy);
-}
 
-/* F と A の線 (アイコンと同じ形)。書き順どおりに並べる */
-typedef struct { float ax, ay, bx, by, w; } Stroke;
-static const Stroke strokes[] = {
-    {160, 350, 160, 222, 28}, {160, 222, 232, 222, 28}, {160, 280, 220, 280, 26},
-    {270, 356, 316, 218, 28}, {316, 218, 362, 356, 28}, {290, 304, 342, 304, 24},
-};
-#define NSTROKE 6
+/* ∞ (レムニスケート)。設計図 512 x 512 の単位。形と色は tools/logo.py と同じ */
+#define LCX 256.0f
+#define LCY 214.0f
+#define LA 168.0f
+#define LW 44.0f
+static float fsin(float x) { /* -π..π に寄せてから多項式 */
+    const float PI = 3.14159265f;
+    while (x > PI) x -= 2 * PI;
+    while (x < -PI) x += 2 * PI;
+    float x2 = x * x;
+    return x * (1 - x2 / 6 * (1 - x2 / 20 * (1 - x2 / 42 * (1 - x2 / 72))));
+}
+static float fcos(float x) { return fsin(x + 1.5707963f); }
+static void lem(float t, float *x, float *y) {
+    float sn = fsin(t), cs = fcos(t), d = 1 + sn * sn;
+    *x = LCX + LA * cs / d; *y = LCY + LA * sn * cs / d;
+}
+static u32 rainbow(float t) { /* t は 0..1 */
+    static const u32 c[5] = {0x9682FF, 0x6D5DFC, 0xEC78DC, 0xFFBE5A, 0x9682FF};
+    t = clamp01(t) * 4; int i = (int)t; if (i > 3) i = 3;
+    return mix(c[i], c[i + 1], t - i);
+}
+/* 線を描きためる板 (アイコンの範囲だけ) */
+#define SB 320
+static float cover[SB * SB];
+static u32 scol[SB * SB];
+static float drawnT; /* どこまで描いたか */
+static int sbx, sby;  /* 板の左上の画面座標 */
+static void stamp(float t, float k, float cx, float cy) {
+    float ux, uy; lem(t, &ux, &uy);
+    float px = (ux - 256) * k + cx - sbx, py = (uy - 256) * k + cy - sby, r = LW / 2 * k;
+    u32 col = rainbow(t / 6.2831853f);
+    for (int y = (int)(py - r - 1); y <= (int)(py + r + 1); y++) for (int x = (int)(px - r - 1); x <= (int)(px + r + 1); x++) {
+        if (x < 0 || y < 0 || x >= SB || y >= SB) continue;
+        float dx = x + 0.5f - px, dy = y + 0.5f - py, c = clamp01(r - fsqrt(dx * dx + dy * dy) + 0.5f);
+        if (c <= 0) continue;
+        int i = y * SB + x;
+        scol[i] = col;
+        if (c > cover[i]) cover[i] = c;
+    }
+}
+/* 交差点で手前を通る線の下に影を落とす */
+static void cross_shadow(float k, float cx, float cy) {
+    for (int y = 0; y < SB; y++) for (int x = 0; x < SB; x++) {
+        int i = y * SB + x; if (cover[i] <= 0) continue;
+        float best = 1e9f;
+        for (int j = 0; j <= 20; j++) {
+            float ux, uy; lem(4.712389f - 0.25f + 0.5f * j / 20, &ux, &uy);
+            float dx = (ux - 256) * k + cx - sbx - x, dy = (uy - 256) * k + cy - sby - y, d = fsqrt(dx * dx + dy * dy);
+            if (d < best) best = d;
+        }
+        float a = (1 - smooth(LW / 2 * k, (LW / 2 + 14) * k, best)) * 0.45f;
+        if (a > 0) scol[i] = mix(scol[i], 0x000000, a);
+    }
+}
 
 static const c16 *TITLE = u"FreeOS Any";
 
@@ -79,6 +121,7 @@ static int big_glyph(int x, int y, c16 ch, u32 color, float alpha) {
     return adv;
 }
 static int big_adv(c16 ch) { int w, adv, h; return title_bitmap(ch, &w, &adv, &h) ? adv : 12; }
+#define TITLE_HALF 17
 static int big_width(const c16 *s) { int w = 0; for (; *s; s++) w += big_adv(*s) + 1; return w - 1; }
 
 /* 1コマ描く。ms は開始からの時間 */
@@ -87,80 +130,68 @@ static void frame(u32 *bg, float ms) {
     int size = SH < 600 ? 150 : 200;
     float cx = SW / 2.0f, cy = SH / 2.0f - size * 0.35f;
 
-    float pop = span(ms, 0, 650), sc = 0.35f + 0.65f * ease_back(pop), alpha = ease_out(pop * 1.6f);
-    float k = size / 440.0f * sc;                 /* 1単位が何画面ピクセルか */
-    float open = ease_out(span(ms, 380, 820));     /* 窓が開く */
-    float ink = span(ms, 760, 1380);               /* 線を書く */
-    float shine = span(ms, 1420, 2000);            /* 光が走る */
+    float pop = span(ms, 0, 600), sc = 0.35f + 0.65f * ease_back(pop), alpha = ease_out(pop * 1.6f);
+    float k = size / 440.0f * sc;                  /* 1単位が何画面ピクセルか */
+    float draw = span(ms, 520, 1500);              /* ∞ を描く */
+    float shine = span(ms, 1650, 2200);            /* 光が走る */
+    float aa = 1 / k;
 
     /* 後ろの光 */
     int glowR = (int)(size * 1.1f);
     for (int y = (int)cy - glowR; y < cy + glowR; y++) for (int x = (int)cx - glowR; x < cx + glowR; x++) {
         float dx = x - cx, dy = y - cy, d = fsqrt(dx * dx + dy * dy) / glowR;
-        blend(x, y, 0x7D6DFF, (1 - smooth(0, 1, d)) * 0.28f * alpha);
+        blend(x, y, 0x7D6DFF, (1 - smooth(0, 1, d)) * 0.22f * alpha);
     }
-
+    /* 角丸 (夜空色) と影 */
     int half = (int)(size * 0.62f * sc) + 30;
-    float aa = 1 / k; /* 1ピクセル分の幅 (設計図の単位) */
-    float ink_len = 0, total = 0;
-    for (int i = 0; i < NSTROKE; i++) { float dx = strokes[i].bx - strokes[i].ax, dy = strokes[i].by - strokes[i].ay; total += fsqrt(dx * dx + dy * dy); }
-    ink_len = ink * total;
-    float wy1 = 186 + (382 - 186) * open; /* 窓の下端 */
-
     for (int y = (int)cy - half; y < cy + half; y++) for (int x = (int)cx - half; x < cx + half; x++) {
         float px = (x + 0.5f - cx) / k + 256, py = (y + 0.5f - cy) / k + 256;
-        /* 影 */
-        float ds = d_rrect(px, py - 14, 36, 36, 476, 476, 100);
-        blend(x, y, 0x05050C, (1 - smooth(-10, 40, ds)) * 0.45f * alpha);
-        /* 紫の角丸 (上から下へ少し濃く) */
-        float d = d_rrect(px, py, 36, 36, 476, 476, 100), cov = clamp01(0.5f - d / aa);
-        if (cov <= 0) continue;
-        u32 base = mix(0x8576FF, 0x5B49EE, clamp01((py - 36) / 440));
-        blend(x, y, base, cov * alpha);
-        /* 窓 */
-        if (open > 0) {
-            float wa = clamp01(open * 3);
-            float dw = d_rrect(px, py, 100, 130, 412, wy1, 24);
-            blend(x, y, 0xF4F4FA, clamp01(0.5f - dw / aa) * wa * alpha);
-            float dt = d_rrect(px, py, 100, 130, 412, 186, 24);
-            float bar = clamp01(0.5f - dt / aa) * (py < 186 ? 1 : 0);
-            if (py >= 162 && py < 186) bar = clamp01(0.5f - dw / aa); /* 下側は角を丸めない */
-            blend(x, y, 0x242440, bar * wa * alpha);
-            /* タイトルバーの丸ボタン */
-            for (int b = 0; b < 3; b++) {
-                float bx = 130 + b * 26, by = 158, db = fsqrt((px - bx) * (px - bx) + (py - by) * (py - by)) - 8;
-                static const u32 bc[3] = {0xFF6B81, 0xFFC857, 0x4ADE80};
-                blend(x, y, bc[b], clamp01(0.5f - db / aa) * wa * alpha * span(ms, 650 + b * 60, 800 + b * 60));
-            }
+        float ds = d_rrect(px, py - 14, 24, 24, 488, 488, 110);
+        blend(x, y, 0x05050C, (1 - smooth(-10, 40, ds)) * 0.5f * alpha);
+        float d = d_rrect(px, py, 24, 24, 488, 488, 110), cov = clamp01(0.5f - d / aa);
+        if (cov > 0) blend(x, y, mix(0x1E1C34, 0x100F1C, clamp01((py - 24) / 464)), cov * alpha);
+    }
+    /* ∞: 右端から一筆で。大きさが決まってから描き始め、描いた分を板に貯める */
+    if (draw > 0) {
+        float e = draw < 0.5f ? 2 * draw * draw : 1 - 2 * (1 - draw) * (1 - draw); /* ゆっくり→速く→ゆっくり */
+        float target = e * 6.2831853f, step = 0.004f;
+        if (drawnT == 0) { memset(cover, 0, sizeof cover); sbx = (int)cx - SB / 2; sby = (int)cy - SB / 2; }
+        while (drawnT < target) {
+            if (drawnT < 4.212389f && drawnT + step >= 4.212389f) cross_shadow(k, cx, cy); /* 交差点の手前で影 */
+            stamp(drawnT, k, cx, cy);
+            drawnT += step;
         }
-        /* F と A を書き順どおりに */
-        if (ink > 0) {
-            float left = ink_len, best = 1e9f;
-            for (int i = 0; i < NSTROKE && left > 0; i++) {
-                const Stroke *s = &strokes[i];
-                float dx = s->bx - s->ax, dy = s->by - s->ay, l = fsqrt(dx * dx + dy * dy), f = left >= l ? 1 : left / l;
-                float dd = d_seg(px, py, s->ax, s->ay, s->ax + dx * f, s->ay + dy * f) - s->w / 2;
-                if (dd < best) best = dd;
-                left -= l;
-            }
-            blend(x, y, 0x6D5DFC, clamp01(0.5f - best / aa) * alpha);
+        for (int y = 0; y < SB; y++) for (int x = 0; x < SB; x++) {
+            int i = y * SB + x;
+            if (cover[i] > 0) blend(sbx + x, sby + y, scol[i], cover[i]);
         }
-        /* 光の帯 (斜め) */
-        if (shine > 0 && shine < 1) {
-            float pos = -200 + shine * 900, band = fabsf_((px + py * 0.6f) - pos);
-            blend(x, y, 0xFFFFFF, (1 - smooth(0, 60, band)) * 0.35f * cov);
+    }
+    /* 角丸の中の Any */
+    float ta = ease_out(span(ms, 1300, 1750));
+    if (ta > 0) {
+        int tw = big_width(u"Any"), x = (int)cx - tw / 2, y = (int)(cy + (392 - 256) * k) - TITLE_HALF + (int)((1 - ta) * 10);
+        for (const c16 *p = u"Any"; *p; p++) x += big_glyph(x, y, *p, 0xFFFFFF, ta) + 1;
+    }
+    /* 光の帯 (斜め、角丸の中だけ) */
+    if (shine > 0 && shine < 1) {
+        for (int y = (int)cy - half; y < cy + half; y++) for (int x = (int)cx - half; x < cx + half; x++) {
+            float px = (x + 0.5f - cx) / k + 256, py = (y + 0.5f - cy) / k + 256;
+            float cov = clamp01(0.5f - d_rrect(px, py, 24, 24, 488, 488, 110) / aa);
+            if (cov <= 0) continue;
+            float pos = -200 + shine * 1000, band = fabsf_((px + py * 0.6f) - pos);
+            blend(x, y, 0xFFFFFF, (1 - smooth(0, 60, band)) * 0.16f * cov);
         }
     }
 
     /* 名前: 1文字ずつ下から浮かぶ */
-    int tw = big_width(TITLE), tx = (SW - tw) / 2, ty = (int)(cy + size * 0.62f + 28);
+    int tw = big_width(TITLE), tx = (SW - tw) / 2, ty = (int)(cy + size * 0.62f + 36);
     for (int i = 0; TITLE[i]; i++) {
-        float t = ease_out(span(ms, 1150 + i * 45, 1500 + i * 45));
+        float t = ease_out(span(ms, 1500 + i * 40, 1850 + i * 40));
         if (t > 0) big_glyph(tx, ty + (int)((1 - t) * 14), TITLE[i], 0xFFFFFF, t);
         tx += big_adv(TITLE[i]) + 1;
     }
     /* 版 */
-    float va = ease_out(span(ms, 1700, 2100));
+    float va = ease_out(span(ms, 1950, 2300));
     if (va > 0) {
         const c16 *v = u"version " FREEOS_VER; int vw = 0;
         for (const c16 *p = v; *p; p++) vw += charw(*p);
@@ -176,7 +207,7 @@ static int key_pressed(void) {
     return any;
 }
 
-#define LENGTH 2500   /* アニメーションの長さ (ミリ秒) */
+#define LENGTH 2700   /* アニメーションの長さ (ミリ秒) */
 #define FADE 450      /* デスクトップへ切り替わる時間 */
 
 void boot_splash(void) {

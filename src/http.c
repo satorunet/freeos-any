@@ -135,7 +135,7 @@ static int once(const char *url, u8 *buf, u64 cap, HttpResult *r, char *location
         do num[--i] = '0' + v % 10; while (v /= 10);
         cadd(req, ":", sizeof req); cadd(req, num + i, sizeof req);
     }
-    cadd(req, "\r\nUser-Agent: Mozilla/5.0 (compatible; FreeOSAny/1.8)\r\nAccept: text/html,text/plain,*/*\r\n"
+    cadd(req, "\r\nUser-Agent: Mozilla/5.0 (compatible; FreeOSAny/1.9)\r\nAccept: text/html,text/plain,*/*\r\n"
               "Accept-Encoding: identity\r\nConnection: close\r\n\r\n", sizeof req);
 
     u64 n = 0; int ok = 1, clean = 1;

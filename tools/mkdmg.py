@@ -12,25 +12,16 @@ import subprocess
 import sys
 import tempfile
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 img, esp, ver = sys.argv[1:4]
 xorriso = os.environ.get('XORRISO', 'xorriso')
 
 
 def icon():
-    base = Image.new('RGBA', (512, 512))
-    d = ImageDraw.Draw(base)
-    d.rounded_rectangle((36, 36, 476, 476), 100, fill=(109, 93, 252, 255))
-    d.rounded_rectangle((100, 130, 412, 382), 24, fill=(244, 244, 250, 255))
-    d.rounded_rectangle((100, 130, 412, 186), 24, fill=(36, 36, 64, 255))
-    d.rectangle((100, 162, 412, 186), fill=(36, 36, 64, 255))
-    # 文字は図形で描く (フォントに依存しない): F と A
-    ink = (109, 93, 252, 255)
-    d.line([(160, 350), (160, 222), (232, 222)], fill=ink, width=28, joint='curve')
-    d.line([(160, 280), (220, 280)], fill=ink, width=26)
-    d.line([(270, 356), (316, 218), (362, 356)], fill=ink, width=28, joint='curve')
-    d.line([(290, 304), (342, 304)], fill=ink, width=24)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from logo import draw_logo
+    base = draw_logo(512)
     chunks = b''
     for kind, size in ((b'ic07', 128), (b'ic08', 256), (b'ic09', 512)):
         buf = io.BytesIO()

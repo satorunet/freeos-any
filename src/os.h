@@ -64,7 +64,7 @@ extern App apps[APP_COUNT];
 void edit_open(const c16 *path);
 
 /* ---- 起動アニメーションと起動音 ---- */
-#define FREEOS_VER u"1.8"
+#define FREEOS_VER u"1.9"
 u32 *screen(void);                     /* 描画先 (SW x SH) */
 void screen_show(void);                /* 描画先を画面に出す */
 void desktop_compose(void);            /* デスクトップを描画先に描く (画面には出さない) */
